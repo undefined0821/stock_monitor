@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.0"
+VERSION = "v3.2"
 
 with open(f"{BASE}/portfolio.json", "r", encoding="utf-8") as f:
     CFG = json.load(f)
