@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 日志与临时文件
+*.log
+monitor.log
+/tmp/
+
+# 本地 AI 模型（体积大，运行时单独放置；启用本地推理需自行下载）
+models/
+
+# 虚拟环境 / 缓存
+.venv/
+env/

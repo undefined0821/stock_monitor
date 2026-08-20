@@ -1,0 +1,97 @@
+{
+  "owner": "我的持仓",
+  "update_note": "简化配置：每只持仓只需填 4 个字段即可 —— code(股票代码)、cost(券商显示的成本价/股数)、shares(实际持有股数=股票余额+当日已买入)、buy_date(买入日期 YYYY-MM-DD)。其余全部自动生成：股票名称(按代码自动识别)、板块、止损/补仓/止盈/压力阈值(用默认 8/5/10/12/20，可单只覆盖)、持仓时长(按买入日期算天数)、以及现价/涨跌/盈亏/市值等实时指标。可选字段：name(名称)、sector_code/sector_name(板块，不填则无板块偏置)、stop_loss_pct/add1_pct/add2_pct/take_profit_pct/pressure_pct(不填用默认)。已清仓的股票在 closed_positions 数组里记录(name/code/close_date/buy_date/shares/cost/close_price/realized_pnl/holding_days)，用于累计已实现盈亏展示。修改后重启服务即生效。",
+  "holdings": [
+    {"code": "600522", "cost": 34.083, "shares": 4200, "buy_date": "2026-08-15"},
+    {"code": "001210", "cost": 26.441, "shares": 800, "buy_date": "2026-08-16"},
+    {"code": "600176", "cost": 44.930, "shares": 400, "buy_date": "2026-08-16"}
+  ],
+  "closed_positions": [
+    {
+      "name": "中京电子",
+      "code": "002579",
+      "market": "sz",
+      "buy_date": "2026-08-17",
+      "close_date": "2026-08-19",
+      "shares": 800,
+      "cost": 15.426,
+      "close_price": 14.800,
+      "realized_pnl": -511.92,
+      "holding_days": 2,
+      "note": "2026-08-19 09:43 卖出 800股@14.800(实际持仓 0，资金 T+1 到账)"
+    }
+  ],
+  "watchlist": [
+    {"name": "观察池示例-可删", "code": "300750", "market": "sz"}
+  ],
+  "settings": {
+    "poll_interval_sec": 5,
+    "take_profit_pct": 12.0,
+    "pressure_pct": 20.0,
+    "anomaly": {
+      "strong_up_pct": 5.0,
+      "strong_down_pct": -5.0,
+      "amplitude_pct": 8.0,
+      "turnover_pct": 15.0,
+      "vol_ratio": 3.0
+    },
+    "preopen": {
+      "strong_limit_dist_pct": 2.0,
+      "mid_limit_dist_pct": 5.0
+    },
+    "scan": {
+      "min_float_mv": 37,
+      "min_price": 8,
+      "mainboard_only": true,
+      "exclude_st": true,
+      "exclude_cyb": true,
+      "limitup_weight": 0.6,
+      "vr_weight": 1.5,
+      "pct_weight": 0.8,
+      "weibi_weight": 2.0,
+      "sig_scale": 6.0,
+      "resonance_strong": 25.0,
+      "resonance_weak": 10.0,
+      "resonance_leader": 8.0,
+      "resonance_min_avg": 0.3,
+      "resonance_min_up_ratio": 0.6,
+      "resonance_leader_thresh": 2.0,
+      "resonance_scale": 0.1,
+      "fv_optimal_min": 30,
+      "fv_optimal_max": 80,
+      "fv_optimal_bonus": 5.0,
+      "fv_mid_penalty": -5.0,
+      "fv_large_thresh": 100,
+      "fv_large_penalty": -30.0,
+      "broken_dist_thresh": 2.0,
+      "red_open_pct": 5.0,
+      "reeval_from": "09:30",
+      "reeval_to": "09:35",
+      "reeval_interval": 30,
+      "yao_min_consec": 2,
+      "yao_consec_bonus": 15,
+      "yao_consec_cap": 45,
+      "yao_smallcap_thresh": 30,
+      "yao_smallcap_bonus": 5.0,
+      "note": "涨停扫描可调阈值: 一字板权重limitup_weight(原1.2→0.6, 顶板不再主导); 板块共振resonance_*(强25/弱10/龙头8, 需均涨>resonance_min_avg且上涨占比>resonance_min_up_ratio); 流通市值区间fv_*(30-80亿最优+5, >100亿大象-30); 炸板阈值broken_dist_thresh(开盘距涨停>此值判炸板); 红开阈值red_open_pct; 9:30后动态校验窗口reeval_from/to及间隔reeval_interval秒; 妖股yao_*(连板>=yao_min_consec天判妖股基因, 每板+yao_consec_bonus封顶yao_consec_cap, 小盘<yao_smallcap_thresh额外+yao_smallcap_bonus且豁免大象惩罚)。历史条件(近一年涨停次数/昨日涨停/5日振幅)因无历史数据源, 用当日实时强度代替。"
+    },
+    "forecast": {
+      "idx_pct_w": 2.2, "idx_late_w": 1.8, "idx_pos_w": 2.0, "idx_vr_w": 1.0,
+      "idx_wb_w": 1.5, "idx_breadth_w": 3.0, "idx_retail_w": 0.8, "idx_sig": 6.0,
+      "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
+      "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
+      "gu_pos_w": 3.5, "gu_parab_w": 1.0, "gu_wb_w": 2.2, "gu_vr_w": 0.6,
+      "gu_to_w": 0.12, "gu_latepull_w": 1.5, "gu_breadth_w": 3.0,
+      "gu_retail_w": 0.6, "gu_idxlate_w": 1.2, "gu_sig": 3.0, "gu_parab_peak": 4.0,
+      "ai_fuse_w": 0.45,
+      "note": "v2.8预测模块可调权重(七个指数/尾盘/高开因子 + AI融合权重)。宽度idx_breadth_w/cl_breadth_w/gu_breadth_w: 上涨板块占比偏离0.5的权重(经验3.0/6.0/3.0); 尾盘动向idx_late_w/cl_late_w/gu_idxlate_w: 上证最后10分钟相对前段涨跌幅的权重(1.8/2.5/1.2, 关键预测力); 尾盘拉升gu_latepull_w: 个股最后10分钟相对前段涨跌幅(1.5); 小盘idx_retail_w/cl_retail_w/gu_retail_w: 国证2000当日涨幅权重(0.8/1.0/0.6)。ai_fuse_w=AI融合权重(默认0.45)。"
+    },
+    "ai_assist": {
+      "enabled": false,
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "",
+      "model": "gpt-4o-mini",
+      "note": "尾盘高开潜力默认由本地内置模型(Qwen2.5-1.5B, 自动探测无需API key)与盘口启发式融合精修(AI权重见环境变量AI_FUSE_W, 默认0.45)。如需接入更强的远程模型, 设{\"enabled\":true,\"api_key\":\"sk-...\",\"model\":\"gpt-4o\"} 或环境变量 AI_ASSIST=1/OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL"
+    }
+  }
+}
