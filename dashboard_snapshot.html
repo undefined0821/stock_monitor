@@ -75,7 +75,7 @@ td:first-child,th:first-child{text-align:left}
   <div class="feed" id="feed" style="max-height:180px"><div class="note">暂无预警</div></div>
 
   <!-- 2. 上证指数1小时趋势预测 -->
-  <div class="section">📈 上证指数 1 小时后趋势预测 <span class="code">每5分钟更新 · 含AI权重</span></div>
+  <div class="section">📈 上证指数 1 小时后趋势预测 <span class="code">每2分钟更新 · 含AI权重</span></div>
   <div class="card" id="idxforecast"><div class="note">加载中…</div>
     <button onclick="manual('idx')" style="margin-top:10px;background:var(--blue);color:#06121f;border:none;padding:7px 14px;border-radius:6px;cursor:pointer">手动预测</button>
   </div>
@@ -235,7 +235,7 @@ function render(d){
       <canvas id="idxChart" class="minichart"></canvas>
       <div class="note">${f.note}${f.ai_used?' ｜ <b style="color:var(--info)">AI模型已参与</b>':''}</div>`;
     drawMinute(f.chart, f.pct);
-  } else ifEl.innerHTML='<div class="note">指数预测未生成(9:15后每5分钟更新)</div>';
+  } else ifEl.innerHTML='<div class="note">指数预测未生成(9:15后每2分钟更新)</div>';
 
   // 9:20 涨停扫描
   const po=document.getElementById('preopen');

@@ -4,7 +4,7 @@
 - 仅工作日(周一~周五)运行
 - 9:20 起每分钟更新"开盘前涨停趋势": 自动扫描主板选出3只未持有强势股 + 涨停概率
 - 持仓: 止盈点/压力位/止损/补仓点
-- 最上方: 上证指数 1 小时后趋势预测(每5分钟), 并标概率
+- 最上方: 上证指数 1 小时后趋势预测(每2分钟), 并标概率
 - 异动提醒置顶
 数据底座: 腾讯财经实时行情 qt.gtimg.cn (真实数据)
 """
@@ -426,7 +426,7 @@ def _late_pull(code):
 
 
 def index_forecast(snap=None):
-    """每5分钟预测上证1小时后方向。v2.8多因子: 动量/尾盘动向/日内位置/量能/宽度/小盘情绪 + 置信度。"""
+    """每2分钟预测上证1小时后方向。v2.8多因子: 动量/尾盘动向/日内位置/量能/宽度/小盘情绪 + 置信度。"""
     q = fetch_tencent(["sh000001"])
     d = parse_row(q.get("SH000001", []))
     if not d["price"]:
@@ -1668,10 +1668,10 @@ def scheduler_loop():
                 STATE["latest"] = snap
                 STATE["last_update"] = now
 
-                # 指数1小时预测: 每5分钟(异步 worker + AI 融合, 不阻塞调度循环)
+                # 指数1小时预测: 每2分钟(异步 worker + AI 融合, 不阻塞调度循环)
                 if now.time() >= datetime.time(9, 15):
                     last = STATE["idx_forecast_time"]
-                    if not last or (now - last).total_seconds() >= 300:
+                    if not last or (now - last).total_seconds() >= 120:
                         STATE["idx_forecast_time"] = now
                         _start_idx_build()
 
@@ -1906,7 +1906,7 @@ td:first-child,th:first-child{text-align:left}
   <div class="feed" id="feed" style="max-height:180px"><div class="note">暂无预警</div></div>
 
   <!-- 2. 上证指数1小时趋势预测 -->
-  <div class="section">📈 上证指数 1 小时后趋势预测 <span class="code">每5分钟更新 · 含AI权重</span></div>
+  <div class="section">📈 上证指数 1 小时后趋势预测 <span class="code">每2分钟更新 · 含AI权重</span></div>
   <div class="card" id="idxforecast"><div class="note">加载中…</div>
     <button onclick="manual('idx')" style="margin-top:10px;background:var(--blue);color:#06121f;border:none;padding:7px 14px;border-radius:6px;cursor:pointer">手动预测</button>
   </div>
@@ -2066,7 +2066,7 @@ function render(d){
       <canvas id="idxChart" class="minichart"></canvas>
       <div class="note">${f.note}${f.ai_used?' ｜ <b style="color:var(--info)">AI模型已参与</b>':''}</div>`;
     drawMinute(f.chart, f.pct);
-  } else ifEl.innerHTML='<div class="note">指数预测未生成(9:15后每5分钟更新)</div>';
+  } else ifEl.innerHTML='<div class="note">指数预测未生成(9:15后每2分钟更新)</div>';
 
   // 9:20 涨停扫描
   const po=document.getElementById('preopen');
