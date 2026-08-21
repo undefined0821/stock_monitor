@@ -16,13 +16,15 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.2"
+VERSION = "v3.3"
+PORTFOLIO_PATH = f"{BASE}/portfolio.json"
+_HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
 with open(f"{BASE}/portfolio.json", "r", encoding="utf-8") as f:
     CFG = json.load(f)
 HOLDINGS_RAW = CFG["holdings"]
 WATCHLIST = CFG.get("watchlist", [])
-CLOSED = CFG.get("closed_positions", [])  # 已清仓(含已实现盈亏, 单独展示不删除)
+CLOSED = CFG.get("closed_positions", [])  # 已清仓(含已实现盈亏, 按用户要求不展示, 仅保留数据)
 SET = CFG.get("settings", {})
 POLL = SET.get("poll_interval_sec", 5)
 ANOM = SET.get("anomaly", {})
@@ -549,6 +551,15 @@ def _normalize_holdings(raw):
 
 
 HOLDINGS = _normalize_holdings(HOLDINGS_RAW)
+
+
+def reload_holdings():
+    """运行时热重载持仓配置(前端编辑保存后调用, 无需重启服务)。"""
+    global HOLDINGS
+    with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    with _HOLD_LOCK:
+        HOLDINGS = _normalize_holdings(cfg.get("holdings", []))
 
 
 # 候选池缓存: 后台线程构建, API即时返回
@@ -1164,8 +1175,8 @@ def build_snapshot():
     total_day_pnl_pct = round(total_day_pnl / total_prev_value * 100, 2) if total_prev_value else 0
 
     # 已清仓: 计算累计已实现盈亏与今日已实现盈亏(close_date==今天)
-    closed_total = sum(c.get("realized_pnl", 0) for c in CLOSED)
-    closed_today = sum(c.get("realized_pnl", 0) for c in CLOSED
+    closed_total = sum((c.get("realized_pnl") or 0) for c in CLOSED)
+    closed_today = sum((c.get("realized_pnl") or 0) for c in CLOSED
                        if c.get("close_date") == now.strftime("%Y-%m-%d"))
 
     return {
@@ -1182,9 +1193,9 @@ def build_snapshot():
         "idx_forecast": STATE["idx_forecast"],
         "preopen": STATE["preopen"], "close": STATE["close"],
         "alerts": STATE["alerts"][-10:],   # 异动提醒最多显示10条最新
-        "closed_positions": CLOSED,        # 已清仓列表(带已实现盈亏, 单独展示)
-        "closed_total_pnl": round(closed_total, 2),  # 累计已实现盈亏
-        "closed_today_pnl": round(closed_today, 2),  # 今日已实现盈亏
+        "closed_positions": CLOSED,        # 已清仓列表(数据保留, 前端不展示)
+        "closed_total_pnl": round(closed_total, 2),  # 累计已实现盈亏(数据保留, 前端不展示)
+        "closed_today_pnl": round(closed_today, 2),  # 今日已实现盈亏(数据保留, 前端不展示)
     }
 
 
@@ -1828,6 +1839,52 @@ def api_gapup():
     return jsonify(r)
 
 
+@app.route("/api/portfolio", methods=["GET", "POST"])
+def api_portfolio():
+    """持仓前端编辑接口。
+    GET : 返回当前内存持仓(仅可编辑字段 code/cost/shares), 用于初始化编辑表单。
+    POST: 保存编辑结果, 仅接受 code/cost/shares; 原子写回 portfolio.json 并热重载,
+          其余字段(closed_positions/settings/watchlist 等)保持不变, 无需重启服务。"""
+    global HOLDINGS
+    if request.method == "GET":
+        with _HOLD_LOCK:
+            rows = [{"code": h["code"], "cost": h["cost"], "shares": h["shares"]} for h in HOLDINGS]
+        return jsonify({"holdings": rows})
+    # POST: 前端编辑后保存
+    try:
+        payload = request.get_json(force=True)
+        raw = payload.get("holdings", [])
+        new_holdings, seen = [], set()
+        for h in raw:
+            code = str(h.get("code", "")).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            cost = float(h.get("cost", 0) or 0)
+            shares = float(h.get("shares", 0) or 0)
+            if cost < 0 or shares < 0:
+                return jsonify({"ok": False, "error": f"股票 {code} 的成本/股数不能为负"}), 400
+            new_holdings.append({"code": code, "cost": round(cost, 4), "shares": round(shares, 2)})
+        if not new_holdings:
+            return jsonify({"ok": False, "error": "至少保留一只持仓(股票代码不能为空)"}), 400
+        # 读取现有配置, 仅替换 holdings, 保留其余顶层字段
+        with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg["holdings"] = new_holdings
+        tmp = PORTFOLIO_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PORTFOLIO_PATH)   # 原子写, 避免半截文件
+        # 热重载内存, 下一轮快照(≤5s)即生效
+        with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+            cfg2 = json.load(f)
+        with _HOLD_LOCK:
+            HOLDINGS = _normalize_holdings(cfg2.get("holdings", []))
+        return jsonify({"ok": True, "count": len(HOLDINGS)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
 # ----------------------------- 前端 -----------------------------
 DASHBOARD_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -1918,7 +1975,10 @@ td:first-child,th:first-child{text-align:left}
   </div>
 
   <!-- 4. 我的持仓 -->
-  <div class="section">💼 我的持仓（撤离/补仓/止盈/压力位）</div>
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span>💼 我的持仓（撤离/补仓/止盈/压力位）</span>
+    <button onclick="enterEdit()" style="margin-left:auto;background:var(--blue);color:#06121f;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">✏️ 管理持仓</button>
+  </div>
   <div class="kpi">
     <div>总市值<b id="tv">--</b></div>
     <div>浮动盈亏<b id="tp">--</b></div>
@@ -1927,6 +1987,16 @@ td:first-child,th:first-child{text-align:left}
     <div>板块强弱<b id="sb">--</b></div>
   </div>
   <div class="grid" id="holdings"></div>
+  <div class="card" id="pfEditor" style="display:none">
+    <h3>✏️ 编辑持仓 <span class="note" style="font-weight:400">仅可改 股票代码 / 成本 / 股数，其余字段由系统按行情自动计算（无需持有时间 / 购买时间）</span></h3>
+    <div id="pfRows"></div>
+    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
+      <button onclick="pfAdd()" style="background:var(--card);color:var(--txt);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px">➕ 新增一行</button>
+      <button onclick="pfSave()" style="background:var(--up);color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">💾 保存</button>
+      <button onclick="pfCancel()" style="background:var(--card);color:var(--mut);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px">取消</button>
+    </div>
+    <div id="pfMsg" class="note" style="margin-top:8px"></div>
+  </div>
 
   <!-- 5. 大盘 & 板块 -->
   <div class="section">🌐 大盘 & 板块资金动向</div>
@@ -2084,33 +2154,7 @@ function render(d){
   const H=document.getElementById('holdings');H.innerHTML='';
   const mask=v=>showMoney?v:'***';
   const mval=v=>showMoney?fmt(v)+'元':'***';
-  // 已清仓汇总卡片(总是展示, 即使没有清仓记录也展示一行说明)
-  const closed=(d.closed_positions||[]);
-  const ct=d.closed_total_pnl||0, ctd=d.closed_today_pnl||0;
-  if(closed.length){
-    let cHtml=`<div class="card" style="border-left:3px solid var(--warn)">
-      <h3>📦 已清仓 <span class="badge b-muted">${closed.length} 只</span></h3>
-      <div class="row"><span>累计已实现盈亏</span><span class="${showMoney?cls(ct):'masked'}">${showMoney?sign(ct)+'元':mask(0)}</span></div>
-      <div class="row"><span>今日已实现盈亏</span><span class="${showMoney?cls(ctd):'masked'}">${showMoney?sign(ctd)+'元':mask(0)}</span></div>`;
-    closed.forEach(c=>{
-      const cp=c.realized_pnl||0;
-      const cn=c.close_date||'-';
-      const hold=c.holding_days!=null?c.holding_days+' 天':'--';
-      const clsPn=showMoney?cls(cp):'masked';
-      const showPn=showMoney?sign(cp)+'元':mask(0);
-      cHtml+=`<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #333">
-        <div><b>${c.name}</b> <span class="code">${(c.market||'').toUpperCase()}${c.code}</span></div>
-        <div class="row"><span>清仓日</span><span>${cn}</span></div>
-        <div class="row"><span>持仓时长</span><span>${hold}</span></div>
-        <div class="row"><span>卖出</span><span>${c.shares}股 @ ${fmt(c.close_price)}</span></div>
-        <div class="row"><span>成本</span><span>${fmt(c.cost)}</span></div>
-        <div class="row"><span>已实现盈亏</span><span class="${clsPn}">${showPn}</span></div>
-        ${c.note?`<div class="note" style="margin-top:4px">${c.note}</div>`:''}
-      </div>`;
-    });
-    cHtml+='</div>';
-    H.innerHTML+=cHtml;
-  }
+  // 已清仓统计模块(按用户要求不展示): 数据保留在 snapshot 中, 仅不渲染卡片
   (d.holdings||[]).forEach(h=>{
     if(h.error){H.innerHTML+='<div class="card"><h3>'+h.name+' <span class="code">'+h.code+'</span></h3><div class="note">'+h.error+'</div></div>';return;}
     const pc=cls(h.pct);
@@ -2219,6 +2263,53 @@ function manual(t){
       }).catch(()=>{if(b){b.disabled=false;b.style.opacity=1;b.textContent='🎯 立即检测';}});
     }
   }else{fetch('/api/'+t).then(r=>r.json()).then(()=>load());}
+}
+// ---- 持仓前端编辑(仅 code/cost/shares, 保存走 /api/portfolio) ----
+let editing=false, pfEdit=[];
+function enterEdit(){
+  editing=true;
+  document.getElementById('pfEditor').style.display='block';
+  const msg=document.getElementById('pfMsg'); if(msg) msg.textContent='';
+  fetch('/api/portfolio').then(r=>r.json()).then(d=>{
+    pfEdit=(d.holdings||[]).map(h=>({code:String(h.code), cost:h.cost, shares:h.shares}));
+    renderPfRows();
+  }).catch(()=>{pfEdit=[];renderPfRows();});
+}
+function renderPfRows(){
+  const box=document.getElementById('pfRows');
+  if(!box) return;
+  if(!pfEdit.length){box.innerHTML='<div class="note">暂无持仓，点「➕ 新增一行」添加</div>';return;}
+  let h='<table style="width:100%;border-collapse:collapse"><tr><th style="text-align:left;padding:4px 8px">股票代码</th><th style="text-align:left;padding:4px 8px">成本</th><th style="text-align:left;padding:4px 8px">股数</th><th style="padding:4px 8px"></th></tr>';
+  pfEdit.forEach((x,i)=>{
+    h+=`<tr>
+      <td style="padding:4px 8px"><input id="pfCode${i}" value="${x.code}" style="width:96px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;padding:5px 7px;font-size:13px" oninput="pfUpd(${i},'code',this.value)"></td>
+      <td style="padding:4px 8px"><input id="pfCost${i}" type="number" step="0.001" value="${x.cost}" style="width:96px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;padding:5px 7px;font-size:13px" oninput="pfUpd(${i},'cost',this.value)"></td>
+      <td style="padding:4px 8px"><input id="pfShares${i}" type="number" step="1" value="${x.shares}" style="width:96px;background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:5px;padding:5px 7px;font-size:13px" oninput="pfUpd(${i},'shares',this.value)"></td>
+      <td style="padding:4px 8px"><button onclick="pfDel(${i})" style="background:transparent;color:var(--down);border:1px solid var(--down);border-radius:5px;padding:4px 9px;cursor:pointer;font-size:12px">🗑 删除</button></td>
+    </tr>`;
+  });
+  h+='</table>';
+  box.innerHTML=h;
+}
+function pfUpd(i,f,v){ if(pfEdit[i]) pfEdit[i][f]=v; }
+function pfAdd(){ pfEdit.push({code:'',cost:0,shares:0}); renderPfRows(); }
+function pfDel(i){ pfEdit.splice(i,1); renderPfRows(); }
+function pfCancel(){ editing=false; const e=document.getElementById('pfEditor'); if(e) e.style.display='none'; const m=document.getElementById('pfMsg'); if(m) m.textContent=''; }
+function pfSave(){
+  // 从输入框读取最新值(防止 oninput 漏抓)
+  pfEdit.forEach((x,i)=>{
+    const c=document.getElementById('pfCode'+i), co=document.getElementById('pfCost'+i), s=document.getElementById('pfShares'+i);
+    if(c) x.code=c.value; if(co) x.cost=parseFloat(co.value)||0; if(s) x.shares=parseFloat(s.value)||0;
+  });
+  const rows=pfEdit.map(x=>({code:(x.code||'').trim(), cost:parseFloat(x.cost)||0, shares:parseFloat(x.shares)||0})).filter(x=>x.code);
+  const msg=document.getElementById('pfMsg');
+  if(!rows.length){ if(msg) msg.textContent='请至少保留一只持仓，或填写股票代码'; return; }
+  if(msg) msg.textContent='保存中…';
+  fetch('/api/portfolio',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({holdings:rows})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){ if(msg) msg.textContent='✅ 已保存（'+d.count+' 只），约 5 秒内刷新行情'; editing=false; const e=document.getElementById('pfEditor'); if(e) e.style.display='none'; load(); }
+      else { if(msg) msg.textContent='❌ 保存失败：'+(d.error||'未知错误'); }
+    }).catch(e=>{ if(msg) msg.textContent='❌ 保存失败：'+e; });
 }
 load();setInterval(load,5000);
 </script>

@@ -2,9 +2,10 @@
   "owner": "我的持仓",
   "update_note": "简化配置：每只持仓只需填 4 个字段即可 —— code(股票代码)、cost(券商显示的成本价/股数)、shares(实际持有股数=股票余额+当日已买入)、buy_date(买入日期 YYYY-MM-DD)。其余全部自动生成：股票名称(按代码自动识别)、板块、止损/补仓/止盈/压力阈值(用默认 8/5/10/12/20，可单只覆盖)、持仓时长(按买入日期算天数)、以及现价/涨跌/盈亏/市值等实时指标。可选字段：name(名称)、sector_code/sector_name(板块，不填则无板块偏置)、stop_loss_pct/add1_pct/add2_pct/take_profit_pct/pressure_pct(不填用默认)。已清仓的股票在 closed_positions 数组里记录(name/code/close_date/buy_date/shares/cost/close_price/realized_pnl/holding_days)，用于累计已实现盈亏展示。修改后重启服务即生效。",
   "holdings": [
-    {"code": "600522", "cost": 34.083, "shares": 4200, "buy_date": "2026-08-15"},
-    {"code": "001210", "cost": 26.441, "shares": 800, "buy_date": "2026-08-16"},
-    {"code": "600176", "cost": 44.930, "shares": 400, "buy_date": "2026-08-16"}
+    {"code": "600522", "cost": 34.162, "shares": 4200, "buy_date": "2026-08-15"},
+    {"code": "001210", "cost": 22.330, "shares": 500, "buy_date": "2026-08-16"},
+    {"code": "603123", "cost": 9.547, "shares": 3000, "buy_date": "2026-08-21"},
+    {"code": "601899", "cost": 34.318, "shares": 800, "buy_date": "2026-08-21"}
   ],
   "closed_positions": [
     {
@@ -19,6 +20,32 @@
       "realized_pnl": -511.92,
       "holding_days": 2,
       "note": "2026-08-19 09:43 卖出 800股@14.800(实际持仓 0，资金 T+1 到账)"
+    },
+    {
+      "name": "浙江医药",
+      "code": "600216",
+      "market": "sh",
+      "buy_date": "2026-08-19",
+      "close_date": "2026-08-21",
+      "shares": 600,
+      "cost": 0.000,
+      "close_price": null,
+      "realized_pnl": null,
+      "holding_days": 2,
+      "note": "清仓(卖出价待补全，成本此前为新购待入账)"
+    },
+    {
+      "name": "中国巨石",
+      "code": "600176",
+      "market": "sh",
+      "buy_date": "2026-08-16",
+      "close_date": "2026-08-21",
+      "shares": 400,
+      "cost": 45.704,
+      "close_price": null,
+      "realized_pnl": null,
+      "holding_days": 5,
+      "note": "清仓(卖出价待补全)"
     }
   ],
   "watchlist": [
