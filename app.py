@@ -1854,6 +1854,10 @@ def api_portfolio():
     try:
         payload = request.get_json(force=True)
         raw = payload.get("holdings", [])
+        # 读取现有持仓, 保存时按 code 保留原有哪些非编辑字段(如 buy_date/name/sector/阈值等)
+        with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        existing = {str(h.get("code", "")): h for h in cfg.get("holdings", [])}
         new_holdings, seen = [], set()
         for h in raw:
             code = str(h.get("code", "")).strip()
@@ -1864,12 +1868,15 @@ def api_portfolio():
             shares = float(h.get("shares", 0) or 0)
             if cost < 0 or shares < 0:
                 return jsonify({"ok": False, "error": f"股票 {code} 的成本/股数不能为负"}), 400
-            new_holdings.append({"code": code, "cost": round(cost, 4), "shares": round(shares, 2)})
+            # 仅覆盖可编辑的三个字段, 其余原有字段(含 buy_date)原样保留
+            item = dict(existing.get(code, {}))
+            item["code"] = code
+            item["cost"] = round(cost, 4)
+            item["shares"] = round(shares, 2)
+            new_holdings.append(item)
         if not new_holdings:
             return jsonify({"ok": False, "error": "至少保留一只持仓(股票代码不能为空)"}), 400
-        # 读取现有配置, 仅替换 holdings, 保留其余顶层字段
-        with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
+        # 仅替换 holdings, 保留其余顶层字段(closed_positions/settings/watchlist 等)
         cfg["holdings"] = new_holdings
         tmp = PORTFOLIO_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
