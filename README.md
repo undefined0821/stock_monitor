@@ -35,6 +35,7 @@ nohup bash run.sh > monitor.log 2>&1 &
 
 | 版本 | 更新内容 |
 |------|----------|
+| **v3.5** | **修复"发布覆盖持仓"bug**（根因：`portfolio.json`/`gapup_log.jsonl` 被当作代码 git 跟踪，发布时旧基线覆盖线上前端改动）。改造：① 运行时数据移出 git（`.gitignore`），新增 `deploy.sh` 发布包装脚本——**每次发布前先从线上拉取持仓/回测数据再部署**；② `/api/portfolio` GET 返回完整持仓字段（含 `buy_date`），便于忠实同步还原；③ 服务启动自愈（缺失则从 `portfolio.json.example` 初始化、缺失则播种回测基线）；④ `portfolio.json.example` 作为首发默认模板 |
 | **v3.4** | 尾盘高开潜力新增**回测闭环 + 权重自优化**：每个交易日 14:50 自动记录推荐的 5 只（`gapup_log.jsonl`），下一交易日 **09:30 后自动抓取真实开盘价 vs 昨收**判定是否高开并写回验证（`/api/gapup/log` 展示命中率与验证明细）；累积样本达阈值后**坐标上升自动调优** `gu_*` 启发式权重（`/api/gapup/optimize` 可手动触发），持续提升高开判断成功率；页面新增「📊 高开回测」卡片 |
 | **v3.3** | 持仓模块新增**前端编辑能力**：点「✏️ 管理持仓」可对持仓**增 / 删 / 改**，仅可编辑 **股票代码 / 成本 / 股数** 三个字段，其余字段（名称、板块、止损/补仓/止盈/压力位、持仓时长等）仍由系统按行情自动计算，无需持有时间 / 购买时间；保存经 `/api/portfolio` 原子写回 `portfolio.json` 并**热重载**，无需重启服务 |
 | **v3.2** | 上证指数 1 小时后趋势预测更新频率由 5 分钟提高到 **2 分钟**（调度间隔 300s → 120s），更及时地反映盘口变化；同步更新界面文案与 README |
@@ -75,5 +76,21 @@ stock_monitor/
 ├── models/                # 本地 AI 模型（Qwen2.5 0.5B / 1.5B，当前未启用）
 └── README.md
 ```
+
+## ⚠️ 部署与数据保护（务必遵守）
+
+`portfolio.json`、`gapup_log.jsonl`、`gapup_stats.json`、`gapup_weights_tuned.json` 是**用户运行时数据**（前端实时编辑 / 服务累积生成），已从 git 忽略，模板为 `portfolio.json.example`。
+
+**发布必须用 `deploy.sh`，不要用 `publish.js` 直发：**
+
+```bash
+bash deploy.sh   # 先拉取线上持仓/回测数据 → 再部署，避免覆盖前端改动
+```
+
+严禁以下操作（会拿陈旧基线顶掉线上用户数据）：
+- ❌ `git checkout -- portfolio.json` / `git commit -A`（会恢复或提交陈旧持仓）
+- ❌ 直接 `node .../publish.js --dir .`（整目录覆盖式部署，本地旧文件会顶掉线上）
+
+`/api/portfolio` GET 返回完整持仓（含 `buy_date`），便于 `deploy.sh` 忠实同步还原；服务启动时若数据文件缺失会自动从 `portfolio.json.example` 初始化 / 播种回测基线。
 
 > 本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，**不构成投资建议**。

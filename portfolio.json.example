@@ -2,10 +2,29 @@
   "owner": "我的持仓",
   "update_note": "简化配置：每只持仓只需填 4 个字段即可 —— code(股票代码)、cost(券商显示的成本价/股数)、shares(实际持有股数=股票余额+当日已买入)、buy_date(买入日期 YYYY-MM-DD)。其余全部自动生成：股票名称(按代码自动识别)、板块、止损/补仓/止盈/压力阈值(用默认 8/5/10/12/20，可单只覆盖)、持仓时长(按买入日期算天数)、以及现价/涨跌/盈亏/市值等实时指标。可选字段：name(名称)、sector_code/sector_name(板块，不填则无板块偏置)、stop_loss_pct/add1_pct/add2_pct/take_profit_pct/pressure_pct(不填用默认)。已清仓的股票在 closed_positions 数组里记录(name/code/close_date/buy_date/shares/cost/close_price/realized_pnl/holding_days)，用于累计已实现盈亏展示。修改后重启服务即生效。",
   "holdings": [
-    {"code": "600522", "cost": 34.162, "shares": 4200, "buy_date": "2026-08-15"},
-    {"code": "001210", "cost": 22.330, "shares": 500, "buy_date": "2026-08-16"},
-    {"code": "603123", "cost": 9.547, "shares": 3000, "buy_date": "2026-08-21"},
-    {"code": "601899", "cost": 34.318, "shares": 800, "buy_date": "2026-08-21"}
+    {
+      "code": "600522",
+      "cost": 34.162,
+      "shares": 4200.0,
+      "buy_date": "2026-08-15"
+    },
+    {
+      "code": "603123",
+      "cost": 9.547,
+      "shares": 3000.0,
+      "buy_date": "2026-08-21"
+    },
+    {
+      "code": "601899",
+      "cost": 34.318,
+      "shares": 800.0,
+      "buy_date": "2026-08-21"
+    },
+    {
+      "code": "000049",
+      "cost": 23.528,
+      "shares": 600.0
+    }
   ],
   "closed_positions": [
     {
@@ -16,7 +35,7 @@
       "close_date": "2026-08-19",
       "shares": 800,
       "cost": 15.426,
-      "close_price": 14.800,
+      "close_price": 14.8,
       "realized_pnl": -511.92,
       "holding_days": 2,
       "note": "2026-08-19 09:43 卖出 800股@14.800(实际持仓 0，资金 T+1 到账)"
@@ -28,7 +47,7 @@
       "buy_date": "2026-08-19",
       "close_date": "2026-08-21",
       "shares": 600,
-      "cost": 0.000,
+      "cost": 0.0,
       "close_price": null,
       "realized_pnl": null,
       "holding_days": 2,
@@ -49,7 +68,11 @@
     }
   ],
   "watchlist": [
-    {"name": "观察池示例-可删", "code": "300750", "market": "sz"}
+    {
+      "name": "观察池示例-可删",
+      "code": "300750",
+      "market": "sz"
+    }
   ],
   "settings": {
     "poll_interval_sec": 5,
@@ -103,13 +126,32 @@
       "note": "涨停扫描可调阈值: 一字板权重limitup_weight(原1.2→0.6, 顶板不再主导); 板块共振resonance_*(强25/弱10/龙头8, 需均涨>resonance_min_avg且上涨占比>resonance_min_up_ratio); 流通市值区间fv_*(30-80亿最优+5, >100亿大象-30); 炸板阈值broken_dist_thresh(开盘距涨停>此值判炸板); 红开阈值red_open_pct; 9:30后动态校验窗口reeval_from/to及间隔reeval_interval秒; 妖股yao_*(连板>=yao_min_consec天判妖股基因, 每板+yao_consec_bonus封顶yao_consec_cap, 小盘<yao_smallcap_thresh额外+yao_smallcap_bonus且豁免大象惩罚)。历史条件(近一年涨停次数/昨日涨停/5日振幅)因无历史数据源, 用当日实时强度代替。"
     },
     "forecast": {
-      "idx_pct_w": 2.2, "idx_late_w": 1.8, "idx_pos_w": 2.0, "idx_vr_w": 1.0,
-      "idx_wb_w": 1.5, "idx_breadth_w": 3.0, "idx_retail_w": 0.8, "idx_sig": 6.0,
-      "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
-      "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
-      "gu_pos_w": 3.5, "gu_parab_w": 1.0, "gu_wb_w": 2.2, "gu_vr_w": 0.6,
-      "gu_to_w": 0.12, "gu_latepull_w": 1.5, "gu_breadth_w": 3.0,
-      "gu_retail_w": 0.6, "gu_idxlate_w": 1.2, "gu_sig": 3.0, "gu_parab_peak": 4.0,
+      "idx_pct_w": 2.2,
+      "idx_late_w": 1.8,
+      "idx_pos_w": 2.0,
+      "idx_vr_w": 1.0,
+      "idx_wb_w": 1.5,
+      "idx_breadth_w": 3.0,
+      "idx_retail_w": 0.8,
+      "idx_sig": 6.0,
+      "cl_sh_w": 1.8,
+      "cl_cyb_w": 1.0,
+      "cl_sec_w": 1.2,
+      "cl_breadth_w": 6.0,
+      "cl_retail_w": 1.0,
+      "cl_late_w": 2.5,
+      "cl_sig": 6.0,
+      "gu_pos_w": 3.5,
+      "gu_parab_w": 1.0,
+      "gu_wb_w": 2.2,
+      "gu_vr_w": 0.6,
+      "gu_to_w": 0.12,
+      "gu_latepull_w": 1.5,
+      "gu_breadth_w": 3.0,
+      "gu_retail_w": 0.6,
+      "gu_idxlate_w": 1.2,
+      "gu_sig": 3.0,
+      "gu_parab_peak": 4.0,
       "ai_fuse_w": 0.45,
       "note": "v2.8预测模块可调权重(七个指数/尾盘/高开因子 + AI融合权重)。宽度idx_breadth_w/cl_breadth_w/gu_breadth_w: 上涨板块占比偏离0.5的权重(经验3.0/6.0/3.0); 尾盘动向idx_late_w/cl_late_w/gu_idxlate_w: 上证最后10分钟相对前段涨跌幅的权重(1.8/2.5/1.2, 关键预测力); 尾盘拉升gu_latepull_w: 个股最后10分钟相对前段涨跌幅(1.5); 小盘idx_retail_w/cl_retail_w/gu_retail_w: 国证2000当日涨幅权重(0.8/1.0/0.6)。ai_fuse_w=AI融合权重(默认0.45)。"
     },

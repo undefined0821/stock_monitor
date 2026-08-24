@@ -8,7 +8,7 @@
 - 异动提醒置顶
 数据底座: 腾讯财经实时行情 qt.gtimg.cn (真实数据)
 """
-import json, re, math, time, threading, datetime, os, random, traceback
+import json, re, math, time, threading, datetime, os, random, traceback, shutil
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Response, jsonify, request
 
@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.4"
+VERSION = "v3.5"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -577,6 +577,37 @@ def reload_holdings():
         cfg = json.load(f)
     with _HOLD_LOCK:
         HOLDINGS = _normalize_holdings(cfg.get("holdings", []))
+
+
+def _seed_gapup_baseline():
+    """服务首次启动且 gapup_log.jsonl 缺失时, 写入初始基线(记住的5只), 避免历史清零。"""
+    now = beijing_now()
+    base = [("002104", "恒宝股份"), ("600519", "贵州茅台"),
+            ("000603", "盛达资源"), ("601020", "华钰矿业"), ("600127", "金健米业")]
+    stocks = [{"code": c, "name": n, "prob": 0.0, "pct": 0.0, "late_pull": 0.0,
+               "features": {"range_pos": 0.5, "pct": 0.0, "weibi": 0, "volratio": 1,
+                            "turnover": 0, "late_pull": 0.0, "breadth": 0.5, "retail": 0, "idx_late": 0}}
+              for c, n in base]
+    rec = {"date": now.strftime("%Y-%m-%d"), "scan_time": now.strftime("%H:%M:%S"),
+           "source": "manual_baseline_seed", "stocks": stocks, "verified": False}
+    with open(GAPUP_LOG, "w", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print(f"[init] gapup_log.jsonl 缺失, 已播种基线(5只)", flush=True)
+
+
+def _ensure_runtime_data():
+    """启动自愈: 确保运行时数据文件存在, 缺失则用模板/基线初始化, 避免空文件致服务异常。
+    注意: 这些文件属用户数据, 正常发布由 deploy.sh 保证与线上一致, 此处仅兜底。"""
+    if not os.path.exists(PORTFOLIO_PATH):
+        example = PORTFOLIO_PATH + ".example"
+        if os.path.exists(example):
+            shutil.copyfile(example, PORTFOLIO_PATH)
+            print(f"[init] portfolio.json 缺失, 已用示例模板初始化", flush=True)
+    if not os.path.exists(GAPUP_LOG):
+        _seed_gapup_baseline()
+
+
+
 
 
 # 候选池缓存: 后台线程构建, API即时返回
@@ -2186,7 +2217,9 @@ def api_portfolio():
     global HOLDINGS
     if request.method == "GET":
         with _HOLD_LOCK:
-            rows = [{"code": h["code"], "cost": h["cost"], "shares": h["shares"]} for h in HOLDINGS]
+            # 返回完整持仓字典(含 buy_date/name/阈值等非编辑字段), 便于发布前从线上同步还原;
+            # 前端编辑面板仅取 code/cost/shares, 多余字段会被忽略。
+            rows = [dict(h) for h in HOLDINGS]
         return jsonify({"holdings": rows})
     # POST: 前端编辑后保存
     try:
@@ -2718,6 +2751,7 @@ load();setInterval(load,5000);
 
 
 if __name__ == "__main__":
+    _ensure_runtime_data()   # 兜底: 缺失的运行时数据文件用模板/基线初始化
     threading.Thread(target=scheduler_loop, daemon=True).start()
     print(f"监控平台 v2 启动: http://localhost:{PORT}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

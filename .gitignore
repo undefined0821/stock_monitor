@@ -14,3 +14,14 @@ models/
 # 虚拟环境 / 缓存
 .venv/
 env/
+
+# ----------------- 用户运行时数据(关键!) -----------------
+# 以下文件由前端实时编辑 / 服务运行时累积生成, 属"用户数据"而非"代码"。
+# 严禁随代码部署覆盖线上内容 —— 发布请用 deploy.sh(会先从线上拉取再部署)。
+# 切勿执行 `git checkout -- portfolio.json` / `git commit -A`, 否则会用陈旧基线覆盖用户前端改动。
+portfolio.json
+gapup_log.jsonl
+gapup_stats.json
+gapup_weights_tuned.json
+# 首发默认模板(保留在 git, 用于服务首次启动且文件缺失时自愈)
+!portfolio.json.example
