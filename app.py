@@ -16,9 +16,17 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.3"
+VERSION = "v3.4"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
+
+# 尾盘高开潜力: 回测闭环 + 权重自优化(v3.4)
+GAPUP_LOG = f"{BASE}/gapup_log.jsonl"          # 每行一条交易日推荐记录(记住5只)
+GAPUP_STATS = f"{BASE}/gapup_stats.json"       # 累计回测统计(命中率等)
+GAPUP_TUNED = f"{BASE}/gapup_weights_tuned.json"  # 调优后的 gu_* 权重(启动时加载覆盖默认)
+GAPUP_MIN_OPT_SAMPLES = 20                     # 至少累计20只已验证样本才允许自动调权
+GAPUP_OPT_MULTIPLIERS = [0.5, 0.75, 1.25, 1.5, 2.0]  # 坐标上升尝试的权重乘子
+GAPUP_WEIGHT_OVERRIDE = None                    # 调优时临时覆盖 FCONFIG 的 gu_* 权重
 
 with open(f"{BASE}/portfolio.json", "r", encoding="utf-8") as f:
     CFG = json.load(f)
@@ -65,6 +73,15 @@ _FORECAST_DEFAULTS = {
 }
 FORECAST_CFG = SET.get("forecast", {})
 FCONFIG = {**_FORECAST_DEFAULTS, **FORECAST_CFG}            # 生效的预测配置
+# v3.4: 若存在调优后的 gu_* 权重, 启动时加载覆盖默认(由回测闭环自动生成)
+if os.path.exists(GAPUP_TUNED):
+    try:
+        _tw = json.load(open(GAPUP_TUNED, encoding="utf-8"))
+        for _k, _v in _tw.items():
+            FCONFIG[_k] = _v
+        print(f"[init] 已加载调优权重: {list(_tw.keys())}", flush=True)
+    except Exception:
+        pass
 # 可选 AI 精修: 配置 OpenAI 兼容接口后, 平台算法可调用更强模型提升预测准确度
 AI_CFG = SET.get("ai_assist", {})
 AI_ENABLED = str(os.environ.get("AI_ASSIST", AI_CFG.get("enabled", "0"))).lower() in ("1", "true", "on")
@@ -1473,7 +1490,9 @@ class AIClient:
 
 
 def gap_up_score(d, ctx=None, late_pull=0.0):
-    """启发式: 下个交易日开盘高开概率(0-100)。v2.8加入 尾盘拉升/宽度/小盘/大盘尾盘动向。"""
+    """启发式: 下个交易日开盘高开概率(0-100)。v2.8加入 尾盘拉升/宽度/小盘/大盘尾盘动向。
+    v3.4: 支持权重覆盖(_GAPUP_WEIGHT_OVERRIDE), 供调优时临时替换 gu_* 权重。"""
+    W = _GAPUP_WEIGHT_OVERRIDE or FCONFIG
     if d["price"] <= 0 or d["high"] <= d["low"]:
         return 0.0
     rng = d["high"] - d["low"]
@@ -1482,21 +1501,21 @@ def gap_up_score(d, ctx=None, late_pull=0.0):
     weibi = d["weibi"] if 0 <= d["weibi"] <= 100 else 0
     vr = d["volratio"] if 0 < d["volratio"] <= 10 else 1
     to = d["turnover"]
-    peak = FCONFIG.get("gu_parab_peak", 4.0)
+    peak = W.get("gu_parab_peak", 4.0)
     score = 0.0
-    score += (range_pos - 0.5) * FCONFIG["gu_pos_w"]      # ①收在高位 = 尾盘强势
-    score += -((pct - peak) ** 2) / (7.0 / FCONFIG["gu_parab_w"])  # ②涨幅偏好peak附近
-    score += (weibi / 100.0) * FCONFIG["gu_wb_w"]         # ③委比正向
-    score += max(0.0, min(vr, 4.0) - 1.0) * FCONFIG["gu_vr_w"]  # ④量比活跃但不过热
-    score += min(max(to - 3.0, 0.0), 12.0) * FCONFIG["gu_to_w"] # ⑤换手充足
-    score += late_pull * FCONFIG["gu_latepull_w"]         # ⑥尾盘拉升 (强预测力)
+    score += (range_pos - 0.5) * W["gu_pos_w"]      # ①收在高位 = 尾盘强势
+    score += -((pct - peak) ** 2) / (7.0 / W["gu_parab_w"])  # ②涨幅偏好peak附近
+    score += (weibi / 100.0) * W["gu_wb_w"]         # ③委比正向
+    score += max(0.0, min(vr, 4.0) - 1.0) * W["gu_vr_w"]  # ④量比活跃但不过热
+    score += min(max(to - 3.0, 0.0), 12.0) * W["gu_to_w"] # ⑤换手充足
+    score += late_pull * W["gu_latepull_w"]         # ⑥尾盘拉升 (强预测力)
     if ctx:
-        score += (ctx.get("breadth", 0.5) - 0.5) * FCONFIG["gu_breadth_w"]
-        score += ctx.get("retail_pct", 0) * FCONFIG["gu_retail_w"]
-        score += ctx.get("late", 0) * FCONFIG["gu_idxlate_w"]
+        score += (ctx.get("breadth", 0.5) - 0.5) * W["gu_breadth_w"]
+        score += ctx.get("retail_pct", 0) * W["gu_retail_w"]
+        score += ctx.get("late", 0) * W["gu_idxlate_w"]
     if d["amplitude"] > 12:                               # 振幅过大疑似冲高回落
         score -= (d["amplitude"] - 12) * 0.05
-    return round(1 / (1 + math.exp(-score / FCONFIG["gu_sig"])) * 100, 1)
+    return round(1 / (1 + math.exp(-score / W["gu_sig"])) * 100, 1)
 
 
 _GAPUP_BUILDING = False
@@ -1617,6 +1636,24 @@ def _build_gapup_worker(force=False):
                          f"{bname}精修(AI权重{w}), 非投资建议"),
             }
             STATE["gapup_date"] = today
+        # v3.4: 记录当日推荐(记住5只), 供下一交易日开盘后回测验证
+        _log_gapup_record({
+            "date": today,
+            "scan_time": beijing_now().strftime("%H:%M:%S"),
+            "source": "auto",
+            "stocks": [{
+                "code": c["code"], "name": c["name"], "prob": c["prob"],
+                "pct": c["pct"], "late_pull": c.get("late_pull", 0),
+                "features": {
+                    "range_pos": c.get("close_pos", 0.5), "pct": c["pct"],
+                    "weibi": c.get("weibi", 0), "volratio": c.get("volratio", 1),
+                    "turnover": c.get("turnover", 0), "late_pull": c.get("late_pull", 0),
+                    "breadth": ctx.get("breadth", 0.5), "retail": ctx.get("retail_pct", 0),
+                    "idx_late": ctx.get("late", 0),
+                },
+            } for c in final],
+            "verified": False,
+        })
         print(f"[gapup] done, {len(final)} rows", flush=True)
     except Exception:
         traceback.print_exc()
@@ -1637,6 +1674,276 @@ def scan_gap_up(force=False):
         return {"time": now.strftime("%H:%M:%S"), "rows": [], "building": True,
                 "note": "高开潜力扫描中(全市场主板, 约2分钟), 请稍候自动更新…"}
     return STATE["gapup"]
+
+
+# ----------------------------- 尾盘高开潜力: 回测闭环 + 权重自优化(v3.4) -----------------------------
+class _WeightOverride:
+    """临时覆盖 FCONFIG 的 gu_* 权重, 供 optimize 调优时重算分数用。"""
+    def __init__(self, weights):
+        self.weights = weights
+        self.prev = None
+    def __enter__(self):
+        global GAPUP_WEIGHT_OVERRIDE
+        self.prev = GAPUP_WEIGHT_OVERRIDE
+        GAPUP_WEIGHT_OVERRIDE = self.weights
+        return self
+    def __exit__(self, *a):
+        global GAPUP_WEIGHT_OVERRIDE
+        GAPUP_WEIGHT_OVERRIDE = self.prev
+
+
+def _prev_trading_day(dt):
+    """返回 dt 之前最近工作日(周一~五), 跳过周末。"""
+    d = dt.date() if hasattr(dt, "date") else dt
+    while True:
+        d = d - datetime.timedelta(days=1)
+        if datetime.datetime(d.year, d.month, d.day).weekday() < 5:
+            return d
+
+
+def _log_gapup_record(rec):
+    """追加一条交易日推荐记录到 gapup_log.jsonl, 同日同 source 不重复写。"""
+    try:
+        if os.path.exists(GAPUP_LOG):
+            with open(GAPUP_LOG, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        old = json.loads(line)
+                    except Exception:
+                        continue
+                    if old.get("date") == rec.get("date") and old.get("source") == rec.get("source"):
+                        return  # 已记录, 跳过
+        with open(GAPUP_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        traceback.print_exc()
+
+
+def _load_gapup_log():
+    recs = []
+    if os.path.exists(GAPUP_LOG):
+        with open(GAPUP_LOG, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    recs.append(json.loads(line))
+                except Exception:
+                    continue
+    return recs
+
+
+def _find_verify_target(target_date=None):
+    """返回待回测记录(dict)或 None。优先 target_date; 否则最近一个「上一交易日及更早」未验证且有 stocks 的记录。
+    注: 仅回测 date < 今天 的记录, 保证「今日推荐 → 下一交易日开盘验证」的语义, 避免当天误回测。"""
+    recs = _load_gapup_log()
+    if target_date:
+        for r in recs:
+            if r.get("date") == target_date and r.get("stocks"):
+                return r
+        return None
+    today = beijing_now().strftime("%Y-%m-%d")
+    cands = [r for r in recs if not r.get("verified") and r.get("stocks")
+             and r.get("date", "") < today]
+    if not cands:
+        return None
+    cands.sort(key=lambda r: r.get("date", ""), reverse=True)
+    return cands[0]
+
+
+def _load_stats():
+    if os.path.exists(GAPUP_STATS):
+        try:
+            with open(GAPUP_STATS, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"total": 0, "gap_up": 0, "hit_rate": 0.0, "rank_hits": {},
+            "avg_pred": 0.0, "avg_actual": 0.0, "recent": [], "optimizations": []}
+
+
+def _save_stats(stats):
+    with open(GAPUP_STATS, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+
+
+def _accumulate_stats(rec):
+    """把一条已验证记录回写累计统计。"""
+    stats = _load_stats()
+    actual = rec.get("actual") or []
+    if not actual:
+        return stats
+    for a in actual:
+        stats["total"] += 1
+        if a.get("is_gap_up"):
+            stats["gap_up"] += 1
+    stats["hit_rate"] = round(stats["gap_up"] / stats["total"], 4) if stats["total"] else 0.0
+    # 基于全量日志(含本次传入的 rec)重算均值与各 rank 命中(样本量小, 可接受)
+    all_pred, all_act = [], []
+    rank_hits, rank_tot = {}, {}
+    _all_recs = _load_gapup_log()
+    if rec.get("verified") and rec.get("actual") and rec.get("stocks"):
+        _all_recs = _all_recs + [rec]
+    for r in _all_recs:
+        if r.get("verified") and r.get("actual"):
+            for i, s in enumerate(r.get("stocks", [])):
+                a = next((x for x in r.get("actual", []) if x.get("code") == s.get("code")), None)
+                if not a:
+                    continue
+                all_pred.append(s.get("prob", 0))
+                all_act.append(a.get("gap_pct", 0) or 0)
+                rank = i + 1
+                rank_tot[rank] = rank_tot.get(rank, 0) + 1
+                if a.get("is_gap_up"):
+                    rank_hits[rank] = rank_hits.get(rank, 0) + 1
+    if all_pred:
+        stats["avg_pred"] = round(sum(all_pred) / len(all_pred), 2)
+        stats["avg_actual"] = round(sum(all_act) / len(all_act), 2)
+        stats["rank_hits"] = {str(k): round(rank_hits.get(k, 0) / rank_tot[k], 4)
+                              for k in sorted(rank_tot)}
+    # 最近验证明细
+    recent = []
+    for r in _all_recs:
+        if r.get("verified") and r.get("actual"):
+            recent.append({
+                "date": r.get("date"), "verified_at": r.get("verified_at"),
+                "stocks": [{
+                    "code": s.get("code"), "name": s.get("name"), "prob": s.get("prob"),
+                    "gap_pct": next((a.get("gap_pct") for a in r.get("actual", []) if a.get("code") == s.get("code")), None),
+                    "is_gap_up": next((a.get("is_gap_up") for a in r.get("actual", []) if a.get("code") == s.get("code")), None),
+                } for s in r.get("stocks", [])],
+            })
+    recent.sort(key=lambda x: x.get("verified_at", ""), reverse=True)
+    stats["recent"] = recent[:10]
+    _save_stats(stats)
+    return stats
+
+
+def _verify_gapup_open(target_date=None):
+    """核心回测: 取待回测记录的5只, 抓真实开盘价 vs 昨收, 判定是否高开, 写回并累计统计。"""
+    try:
+        rec = _find_verify_target(target_date)
+        if not rec:
+            print("[gapup-verify] 无待回测记录", flush=True)
+            return None
+        if rec.get("verified"):
+            print(f"[gapup-verify] {rec.get('date')} 已验证, 跳过", flush=True)
+            return rec
+        codes = [(_market_prefix(s["code"]) + s["code"]).upper() for s in rec["stocks"]]
+        q = fetch_tencent(codes)
+        actual = []
+        for s in rec["stocks"]:
+            key = (_market_prefix(s["code"]) + s["code"]).upper()
+            p = q.get(key)
+            if not p:
+                actual.append({"code": s["code"], "name": s["name"], "open": None,
+                               "prevclose": None, "gap_pct": None, "is_gap_up": None})
+                continue
+            d = parse_row(p)
+            prev, op = d["prevclose"], d["open"]
+            if prev and prev > 0 and op > 0:
+                gap = (op - prev) / prev * 100
+                actual.append({"code": s["code"], "name": s["name"], "open": round(op, 2),
+                               "prevclose": round(prev, 2), "gap_pct": round(gap, 2),
+                               "is_gap_up": op > prev})
+            else:
+                actual.append({"code": s["code"], "name": s["name"], "open": op,
+                               "prevclose": prev, "gap_pct": None, "is_gap_up": None})
+        rec["verified"] = True
+        rec["verified_at"] = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
+        rec["actual"] = actual
+        recs = _load_gapup_log()
+        for i, r in enumerate(recs):
+            if r.get("date") == rec.get("date") and r.get("source") == rec.get("source"):
+                recs[i] = rec
+                break
+        with open(GAPUP_LOG, "w", encoding="utf-8") as f:
+            for r in recs:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        stats = _accumulate_stats(rec)
+        ng = sum(1 for a in actual if a.get("is_gap_up"))
+        print(f"[gapup-verify] {rec.get('date')} 验证完成: 高开 {ng}/{len(actual)}", flush=True)
+        if stats.get("total", 0) >= GAPUP_MIN_OPT_SAMPLES:
+            optimize_gapup_weights()
+        return rec
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def optimize_gapup_weights():
+    """基于已验证样本, 坐标上升调优 gu_* 权重, 提升高开判定区分度。返回结果 dict。"""
+    try:
+        recs = [r for r in _load_gapup_log()
+                if r.get("verified") and r.get("actual") and r.get("stocks")]
+        samples = []
+        for r in recs:
+            amap = {a["code"]: a for a in r.get("actual", [])}
+            for s in r.get("stocks", []):
+                a = amap.get(s["code"])
+                if not a or a.get("is_gap_up") is None or not s.get("features"):
+                    continue
+                samples.append((s["features"], 1 if a["is_gap_up"] else 0))
+        if len(samples) < GAPUP_MIN_OPT_SAMPLES:
+            return {"ok": False, "reason": f"样本不足({len(samples)}/{GAPUP_MIN_OPT_SAMPLES}), 暂不调权",
+                    "samples": len(samples)}
+        tune_keys = ["gu_pos_w", "gu_parab_w", "gu_wb_w", "gu_vr_w", "gu_to_w",
+                     "gu_latepull_w", "gu_breadth_w", "gu_retail_w", "gu_idxlate_w"]
+        base = dict(FCONFIG)
+
+        def _obj(weights):
+            pos, neg = [], []
+            for feat, y in samples:
+                d = {"price": feat.get("range_pos", 0.5), "high": 1.0, "low": 0.0,
+                     "pct": feat.get("pct", 0), "weibi": feat.get("weibi", 0),
+                     "volratio": feat.get("volratio", 1), "turnover": feat.get("turnover", 0),
+                     "amplitude": 0}
+                ctx = {"breadth": feat.get("breadth", 0.5), "retail_pct": feat.get("retail", 0),
+                       "sector_avg": 0, "late": feat.get("idx_late", 0)}
+                with _WeightOverride(weights):
+                    prob = gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0))
+                (pos if y == 1 else neg).append(prob)
+            if not pos or not neg:
+                return -1.0
+            return (sum(pos) / len(pos)) - (sum(neg) / len(neg))
+
+        best = dict(base)
+        for _ in range(3):
+            improved = False
+            for k in tune_keys:
+                cur = best[k]
+                best_obj = _obj(best)
+                for m in GAPUP_OPT_MULTIPLIERS:
+                    cand = dict(best)
+                    cand[k] = max(0.01, cur * m)
+                    obj = _obj(cand)
+                    if obj > best_obj + 1e-6:
+                        best_obj = obj
+                        best[k] = cand[k]
+                        improved = True
+            if not improved:
+                break
+        result = {"ok": True, "samples": len(samples),
+                  "before": {k: round(base[k], 4) for k in tune_keys},
+                  "after": {k: round(best[k], 4) for k in tune_keys},
+                  "objective_before": round(_obj(base), 3),
+                  "objective_after": round(_obj(best), 3),
+                  "at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")}
+        with open(GAPUP_TUNED, "w", encoding="utf-8") as f:
+            json.dump({k: best[k] for k in tune_keys}, f, ensure_ascii=False, indent=2)
+        stats = _load_stats()
+        stats.setdefault("optimizations", []).append(result)
+        stats["optimizations"] = stats["optimizations"][-10:]
+        _save_stats(stats)
+        print(f"[gapup-opt] 调权完成: 目标 {result['objective_before']}->{result['objective_after']}", flush=True)
+        return result
+    except Exception:
+        traceback.print_exc()
+        return {"ok": False, "reason": "调权异常"}
 
 
 # ----------------------------- 调度器 -----------------------------
@@ -1723,6 +2030,11 @@ def scheduler_loop():
                     if STATE["gapup_date"] != today:
                         STATE["gapup_date"] = today
                         _start_gapup_build()
+
+                # v3.4: 开盘后回测上一交易日推荐是否高开(每天09:30后跑一次, 后台线程不阻塞)
+                if now.time() >= datetime.time(9, 30) and STATE.get("gapup_verify_date") != today:
+                    STATE["gapup_verify_date"] = today
+                    threading.Thread(target=_verify_gapup_open, daemon=True).start()
 
             if trading:
                 time.sleep(POLL)
@@ -1837,6 +2149,32 @@ def api_gapup():
     with LOCK:
         STATE["gapup"] = r
     return jsonify(r)
+
+
+@app.route("/api/gapup/log")
+def api_gapup_log():
+    """返回回测历史记录 + 累计统计, 供前端「高开回测」卡片渲染。"""
+    recs = _load_gapup_log()
+    recs.sort(key=lambda r: r.get("date", ""), reverse=True)
+    stats = _load_stats()
+    tuned = None
+    if os.path.exists(GAPUP_TUNED):
+        try:
+            tuned = json.load(open(GAPUP_TUNED, encoding="utf-8"))
+        except Exception:
+            pass
+    return jsonify({
+        "records": recs[:30],
+        "stats": stats,
+        "tuned_weights": tuned,
+        "min_opt_samples": GAPUP_MIN_OPT_SAMPLES,
+    })
+
+
+@app.route("/api/gapup/optimize", methods=["POST"])
+def api_gapup_optimize():
+    """手动触发权重调优(需累积足够样本)。"""
+    return jsonify(optimize_gapup_weights())
 
 
 @app.route("/api/portfolio", methods=["GET", "POST"])
@@ -2036,6 +2374,14 @@ td:first-child,th:first-child{text-align:left}
     <span id="gapupTip" class="code">点击立即全市场扫描主板，约需 1~3 分钟</span>
   </div>
   <div class="card" id="gapup"><div class="note">尚未生成（交易日 14:50 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
+  <!-- 7.1 高开回测(v3.4) -->
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span>📊 高开回测（推荐→开盘实测）</span>
+    <span class="code">交易日记录推荐, 次日开盘自动验证是否高开, 累积命中率并自优化权重</span>
+    <button onclick="gapOpt()" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto">⚙️ 手动调优权重</button>
+    <span id="gapOptTip" class="code"></span>
+  </div>
+  <div class="card" id="gapverify"><div class="note">加载中…</div></div>
   <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
   <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">__VERSION__</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
 </div>
@@ -2245,7 +2591,55 @@ function render(d){
     r+='</table>';gu.innerHTML=r;
   } else gu.innerHTML='<div class="note">尚未生成（交易日 14:50 起自动检测, 可点按钮立即检测）</div>';
 }
-function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});}
+
+// 高开回测(v3.4): 渲染历史记录 + 命中率
+function renderGapVerify(d){
+  const box=document.getElementById('gapverify');
+  if(!box) return;
+  const s=d.stats||{};
+  const recs=d.records||[];
+  let r='';
+  const hr=s.hit_rate!=null?Math.round(s.hit_rate*100):0;
+  const tot=s.total||0;
+  r+=`<div class="note">累计回测 <b>${tot}</b> 只 ｜ 高开命中率 <b class="${cls(hr)}">${hr}%</b> ｜ 平均预测 <b>${fmt(s.avg_pred,1)}%</b> ｜ 平均实际高开 <b class="${cls(s.avg_actual)}">${fmt(s.avg_actual,2)}%</b> ｜ 自动调权阈值 ≥${d.min_opt_samples}只</div>`;
+  const pending=recs.filter(x=>!x.verified).slice(0,1);
+  if(pending.length){
+    const p=pending[0];
+    r+=`<div class="sub">🕒 待回测（${p.date} 推荐${p.source==='manual_baseline'?'·手动基线':''}）：${p.stocks.map(x=>x.code+' '+x.name+'('+fmt(x.prob,1)+'%)').join('、')}</div>`;
+  }
+  const recent=s.recent||[];
+  if(recent.length){
+    r+='<table><tr><th>验证日</th><th>代码</th><th>名称</th><th>预测概率</th><th>实际高开%</th><th>结果</th></tr>';
+    recent.forEach(rec=>{
+      (rec.stocks||[]).forEach(x=>{
+        const gp=x.gap_pct;
+        const hit=x.is_gap_up;
+        r+=`<tr><td>${rec.verified_at?rec.verified_at.slice(0,10):rec.date}</td><td>${x.code}</td><td>${x.name}</td><td class="prob ${probcls(x.prob)}">${fmt(x.prob,1)}%</td><td class="${cls(gp)}">${gp==null?'--':(gp>=0?'+':'')+fmt(gp,2)+'%'}</td><td>${hit==null?'--':(hit?'✅ 高开':'❌ 未高开')}</td></tr>`;
+      });
+    });
+    r+='</table>';
+  } else {
+    r+='<div class="note">尚无验证数据。下一交易日 09:30 后自动回测当前推荐的 5 只是否高开。</div>';
+  }
+  box.innerHTML=r;
+}
+
+function gapOpt(){
+  const tip=document.getElementById('gapOptTip');
+  if(tip)tip.textContent='调权中(需≥样本阈值)…';
+  fetch('/api/gapup/optimize',{method:'POST'}).then(r=>r.json()).then(res=>{
+    if(tip){
+      if(res.ok){
+        tip.textContent=`✅ 已调权(${res.samples}样本): 目标${res.objective_before}→${res.objective_after}`;
+      } else {
+        tip.textContent=`ℹ️ ${res.reason||'样本不足'}`;
+      }
+    }
+    setTimeout(load,800);
+  }).catch(()=>{if(tip)tip.textContent='调权失败';});
+}
+
+function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});}
 function manual(t){
   if(t==='close'){
     const b=document.getElementById('closeRefreshBtn');
