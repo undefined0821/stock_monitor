@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.5"
+VERSION = "v3.6"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -1340,8 +1340,11 @@ class AIClient:
     """本地 transformers 推理优先(无需 API key); 若配置 OpenAI 兼容接口则远程兜底。"""
 
     def __init__(self):
+        # 本地模型默认关闭: 沙箱 CPU 推理极慢且占用 ~6GB 内存(1.5B float32),
+        # 易卡死/被 OOM 杀掉。需显式 LOCAL_AI=1 才启用。无远程 key 时回退纯启发式。
         self.local_dir = LOCAL_MODEL_DIR
-        self.use_local = LOCAL_MODEL_DIR is not None
+        self.use_local = LOCAL_MODEL_DIR is not None and \
+            str(os.environ.get("LOCAL_AI", "0")).lower() in ("1", "true", "on")
         self.use_remote = bool(AI_ENABLED and AI_KEY)
         self.available = self.use_local or self.use_remote
         self.model = AI_MODEL
