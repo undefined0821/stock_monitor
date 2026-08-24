@@ -605,6 +605,16 @@ def _ensure_runtime_data():
             print(f"[init] portfolio.json 缺失, 已用示例模板初始化", flush=True)
     if not os.path.exists(GAPUP_LOG):
         _seed_gapup_baseline()
+    # 3) 加载调优后的权重(若存在)覆盖默认 gu_*(部分字典即可, gap_up_score 会合并到 FCONFIG)
+    global GAPUP_WEIGHT_OVERRIDE
+    if os.path.exists(GAPUP_TUNED):
+        try:
+            tw = json.load(open(GAPUP_TUNED, encoding="utf-8"))
+            if isinstance(tw, dict) and tw:
+                GAPUP_WEIGHT_OVERRIDE = {k: float(v) for k, v in tw.items()}
+                print(f"[init] 已加载调优权重: {len(tw)} 项", flush=True)
+        except Exception:
+            pass
 
 
 
@@ -1523,7 +1533,7 @@ class AIClient:
 def gap_up_score(d, ctx=None, late_pull=0.0):
     """启发式: 下个交易日开盘高开概率(0-100)。v2.8加入 尾盘拉升/宽度/小盘/大盘尾盘动向。
     v3.4: 支持权重覆盖(_GAPUP_WEIGHT_OVERRIDE), 供调优时临时替换 gu_* 权重。"""
-    W = _GAPUP_WEIGHT_OVERRIDE or FCONFIG
+    W = {**FCONFIG, **(GAPUP_WEIGHT_OVERRIDE or {})}  # 覆盖权重合并到默认, 保证键齐全
     if d["price"] <= 0 or d["high"] <= d["low"]:
         return 0.0
     rng = d["high"] - d["low"]
@@ -1721,6 +1731,11 @@ class _WeightOverride:
     def __exit__(self, *a):
         global GAPUP_WEIGHT_OVERRIDE
         GAPUP_WEIGHT_OVERRIDE = self.prev
+
+
+# 生效的权重覆盖(None = 用 FCONFIG 默认)。启动时可从 gapup_weights_tuned.json 加载;
+# optimize 调优时由 _WeightOverride 临时覆盖。必须定义在模块级, 供 _WeightOverride 引用。
+GAPUP_WEIGHT_OVERRIDE = None
 
 
 def _prev_trading_day(dt):
