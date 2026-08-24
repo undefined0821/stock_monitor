@@ -36,9 +36,25 @@ for p in (local_path, example_path):
         continue
 if base is None:
     base = {}
+# 非编辑字段 buy_date 的回填: 取示例或本地中任一"非空"买入日(防止同步冲刷买入日)
+bd_ref = {}
+for p in (example_path, local_path):
+    try:
+        for h in json.load(open(p)).get("holdings", []):
+            c = str(h.get("code", ""))
+            b = h.get("buy_date", "")
+            if c and b:
+                bd_ref[c] = b
+    except Exception:
+        pass
+for h in live_holdings:
+    c = str(h.get("code", ""))
+    if not h.get("buy_date") and c in bd_ref:
+        h["buy_date"] = bd_ref[c]
 base["holdings"] = live_holdings
 json.dump(base, open(local_path, "w"), ensure_ascii=False, indent=2)
 print("  ✓ 持仓已同步为线上最新:", [h.get("code") for h in live_holdings])
+print("    buy_date 回填:", {h.get("code"): h.get("buy_date") for h in live_holdings})
 PY
 else
   echo "  ! 拉取线上持仓失败(服务可能未就绪), 将沿用本地 portfolio.json"
