@@ -61,10 +61,13 @@ else
 fi
 rm -f "$tmp"
 
-# —— 回测日志: 用 /api/gapup/log 的 records 重建(尽力而为, 保护基线/历史) ——
-tmp2=$(mktemp)
-if curl -s --max-time 20 "$URL/api/gapup/log" -o "$tmp2" && [ -s "$tmp2" ]; then
-  python3.11 - "$GAPLOG" "$tmp2" <<'PY'
+# —— 回测日志: 本地优先, 不反向覆盖 ——
+# v3.7.1: 回测日志是运行时累积数据(含基线/历史验证), 发布不应重置或反向覆盖。
+# 仅当本地文件确实缺失/为空时才用线上记录初始化; 否则保留本地(已清理假基线的权威版本)。
+if [ ! -s "$GAPLOG" ]; then
+  tmp2=$(mktemp)
+  if curl -s --max-time 20 "$URL/api/gapup/log" -o "$tmp2" && [ -s "$tmp2" ]; then
+    python3.11 - "$GAPLOG" "$tmp2" <<'PY'
 import json, sys
 out_path, live_path = sys.argv[1], sys.argv[2]
 try:
@@ -72,16 +75,19 @@ try:
     recs = d.get("records", [])
     assert recs, "线上无回测记录"
 except Exception as e:
-    print("  ! 解析线上回测日志失败, 跳过同步:", e); sys.exit(0)
+    print("  ! 解析线上回测日志失败, 保留本地:", e); sys.exit(0)
 with open(out_path, "w", encoding="utf-8") as f:
     for r in recs:
         f.write(json.dumps(r, ensure_ascii=False) + "\n")
-print("  ✓ 回测日志已同步:", len(recs), "条")
+print("  ✓ 本地回测日志缺失, 已从线上初始化:", len(recs), "条")
 PY
+  else
+    echo "  ! 本地与线上回测日志均不可用, 将由服务自愈生成"
+  fi
+  rm -f "$tmp2"
 else
-  echo "  ! 拉取线上回测日志失败, 将沿用本地 gapup_log.jsonl"
+  echo "  ✓ 本地回测日志已存在(已清理假基线), 保留本地, 不覆盖"
 fi
-rm -f "$tmp2"
 
 echo "==> [2/2] 调用发布脚本部署..."
 cd "$BASE_DIR" || exit 1
