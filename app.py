@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.7.7"
+VERSION = "v3.8.0"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -113,6 +113,20 @@ SECTOR_BOARDS = [
     ("sz399934", "金融地产"), ("sz399935", "信息技术"), ("sz399936", "电信业务"),
     ("sz399937", "公用事业"), ("sz399975", "证券公司"), ("sz399997", "中证白酒"),
 ]
+
+# 股票→所属板块(中证行业指数)归属表: 腾讯个股行情不含"所属行业"字段, 且 portfolio.json
+# 里用户持仓多未填 sector, 故在此做轻量归属, 供持仓卡片角落展示"所属板块涨跌"。
+# key=股票代码(不带市场前缀), value=SECTOR_BOARDS 里的板块名。新增持仓时在此补充即可。
+STOCK_SECTOR = {
+    "600522": "信息技术",   # 中天科技(通信设备/光纤)
+    "603123": "可选消费",   # 翠微股份(商业零售)
+    "002657": "信息技术",   # 中科金财(金融科技/软件)
+    "000049": "工业",       # 德赛电池(电池/电子制造)
+    "002401": "信息技术",   # 中远海科(智能交通/软件)
+    "600475": "公用事业",   # 华光环能(环保能源/热电)
+    "600613": "医药卫生",   # 神奇制药(制药)
+}
+_SECTOR_NAME_TO_CODE = {nm: c for c, nm in SECTOR_BOARDS}
 
 STATE = {
     "latest": None, "last_update": None, "trading": False,
@@ -570,8 +584,11 @@ def _normalize_holdings(raw):
             "cost": float(h.get("cost", 0) or 0),
             "buy_date": str(h.get("buy_date", "")).strip(),
             "name": str(h.get("name", "")).strip(),
-            "sector_code": str(h.get("sector_code", "")).strip(),
-            "sector_name": str(h.get("sector_name", "")).strip(),
+            # 板块归属: 优先用 portfolio.json 显式设置, 否则回退到内置 STOCK_SECTOR 表
+            "sector_code": str(h.get("sector_code", "")).strip()
+                            or _SECTOR_NAME_TO_CODE.get(STOCK_SECTOR.get(str(h.get("code", "")).strip(), ""), ""),
+            "sector_name": str(h.get("sector_name", "")).strip()
+                           or STOCK_SECTOR.get(str(h.get("code", "")).strip(), ""),
             "stop_loss_pct": float(h.get("stop_loss_pct", 8.0)),
             "add1_pct": float(h.get("add1_pct", 5.0)),
             "add2_pct": float(h.get("add2_pct", 10.0)),
@@ -1255,6 +1272,17 @@ def build_snapshot():
         if d["price"]:
             sectors.append({"name": nm, "code": c, "pct": round(d["pct"], 2)})
     sectors.sort(key=lambda x: x["pct"], reverse=True)
+    # 为每只持仓附加"所属板块涨跌 + 在全板块中的强弱排名", 供卡片角落芯片展示
+    _sec_by_code = {s["code"]: s for s in sectors}
+    _sec_rank = {s["code"]: i + 1 for i, s in enumerate(sectors)}  # 1=最强
+    for h in holdings:
+        if h.get("error") or not h.get("sector_code"):
+            continue
+        sc = _sec_by_code.get(h["sector_code"])
+        if sc:
+            h["sector_pct"] = sc["pct"]
+            h["sector_rank"] = _sec_rank.get(h["sector_code"])
+            h["sector_total"] = len(sectors)
     up = [s for s in sectors if s["pct"] > 0]
     avg = sum(s["pct"] for s in sectors) / len(sectors) if sectors else 0
     bias = ("资金偏流入/板块上升" if avg > 0.3
@@ -2400,25 +2428,40 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 [data-theme="light"]{--bg:#f6f8fa;--card:#ffffff;--line:#d0d7de;--up:#d1242f;--down:#1a7f37;
 --txt:#1f2328;--mut:#656d76;--gold:#9a6700;--blue:#0969da;--row-line:#eaeef2;--feed-bg:#f0f3f6;--chart-bg:#eef1f4}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px}
-header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:14px;align-items:center;position:sticky;top:0;background:var(--bg);z-index:10}
-header h1{font-size:18px;margin:0}
-.tag{font-size:12px;color:var(--mut);padding:3px 9px;border:1px solid var(--line);border-radius:20px}
-.tag.live{color:var(--up);border-color:var(--up)}
-.wrap{max-width:1280px;margin:0 auto;padding:18px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
-.card h3{margin:0 0 10px;font-size:15px;display:flex;justify-content:space-between;align-items:baseline}
-.code{color:var(--mut);font-size:12px;font-weight:normal}
-.px{font-size:30px;font-weight:700}
-.pct{font-size:15px;font-weight:600;margin-left:8px}
+body{margin:0;color:var(--txt);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:radial-gradient(1100px 520px at 85% -8%,rgba(88,166,255,.07),transparent 60%),var(--bg)}
+header{padding:13px 22px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:14px;align-items:center;
+  position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(10px)}
+header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
+.tag{font-size:12px;color:var(--mut);padding:3px 10px;border:1px solid var(--line);border-radius:20px}
+.tag.live{color:var(--up);border-color:var(--up);background:rgba(239,83,80,.08)}
+.wrap{max-width:1280px;margin:0 auto;padding:20px 18px 64px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.card{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:16px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.card:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.30);border-color:#3d4756}
+.card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
+.card.up::before{background:var(--up)}.card.down::before{background:var(--down)}
+.card h3{margin:0 0 2px;font-size:15px;font-weight:600;display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.code{color:var(--mut);font-size:12px;font-weight:normal;letter-spacing:.3px}
+.px{font-size:30px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+.pct{font-size:15px;font-weight:600;margin-left:8px;font-variant-numeric:tabular-nums}
 .up{color:var(--up)}.down{color:var(--down)}.flat{color:var(--mut)}
-.row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px dashed var(--row-line);font-size:13px}
-.row span:last-child{font-variant-numeric:tabular-nums}
-.kpi{display:flex;gap:18px;flex-wrap:wrap;margin:6px 0 14px}
-.kpi div{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 16px}
-.kpi b{display:block;font-size:22px}
-.section{margin:26px 0 8px;font-size:16px;border-left:4px solid var(--blue);padding-left:10px}
+.sector-chip{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;font-size:11px;line-height:1;
+  padding:5px 9px;border-radius:999px;border:1px solid var(--line);background:var(--row-line);color:var(--mut);white-space:nowrap}
+.sector-chip .sp{font-weight:700;font-variant-numeric:tabular-nums}
+.sector-chip .rk{opacity:.65;font-size:10px}
+.grp{margin:12px 0 2px;font-size:11px;letter-spacing:1.5px;color:var(--mut);text-transform:uppercase;border-top:1px solid var(--row-line);padding-top:9px}
+.row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--row-line);font-size:13px}
+.row .lbl{color:var(--mut)}
+.row:last-of-type{border-bottom:none}
+.row span:last-child{font-variant-numeric:tabular-nums;font-weight:500}
+.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 18px}
+.kpi div{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 16px;min-width:118px;flex:1;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.kpi div{color:var(--mut);font-size:12px}
+.kpi b{display:block;font-size:22px;font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums;margin-top:2px}
+.section{margin:30px 0 12px;font-size:16px;font-weight:600;letter-spacing:.3px;border-left:4px solid var(--blue);padding-left:12px}
 .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:6px;margin:2px 4px 2px 0}
 .b-yao{background:rgba(255,107,107,.16);color:#ff6b6b;border:1px solid #ff6b6b}
 .b-danger{background:rgba(239,83,80,.18);color:var(--up)}
@@ -2669,22 +2712,27 @@ function render(d){
   (d.holdings||[]).forEach(h=>{
     if(h.error){H.innerHTML+='<div class="card"><h3>'+h.name+' <span class="code">'+h.code+'</span></h3><div class="note">'+h.error+'</div></div>';return;}
     const pc=cls(h.pct);
+    // 角落板块芯片: 所属板块名 + 板块涨跌幅 + 全板块强弱排名(板块整体涨跌, 非成分股家数比例)
+    const secChip = h.sector_name ? `<span class="sector-chip" title="所属板块行情涨跌">${h.sector_name} <span class="sp ${cls(h.sector_pct)}">${sign(h.sector_pct)}%</span>${h.sector_rank?'<span class="rk">'+h.sector_rank+'/'+(h.sector_total||'')+'</span>':''}</span>` : '';
     let badges=(h.anomalies||[]).map(a=>'<span class="badge b-'+a.level+'">'+a.text+'</span>').join('');
-    H.innerHTML+=`<div class="card">
-      <h3>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></h3>
-      <div><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pc}">${sign(h.pct)}%</span></div>
-      <div class="row"><span>持仓市值</span><span class="${showMoney?'':'masked'}">${mval(h.value)}</span></div>
-      <div class="row"><span>浮动盈亏</span><span class="${showMoney?'':'masked'} ${cls(h.pnl)}">${showMoney?sign(h.pnl)+'元':mask(0)} (${showMoney?sign(h.pnl_pct)+'%':mask(0)})</span></div>
-      <div class="row"><span>当日盈亏</span><span class="${showMoney?'':'masked'} ${cls(h.day_pnl)}">${showMoney?sign(h.day_pnl)+'元':mask(0)} (${showMoney?sign(h.day_pnl_pct)+'%':mask(0)})<span class="note" style="margin-left:6px">·基${h.day_basis}</span></span></div>
-      <div class="row"><span>成本 / 股数</span><span class="${showMoney?'':'masked'}">${showMoney?fmt(h.cost,3):'***'} / ${h.shares}股</span></div>
-      <div class="row"><span>📅 持仓时长</span><span>${h.holding_days!=null?h.holding_days+' 天':'--'}${h.buy_date?' · '+h.buy_date:''}</span></div>
-      <div class="row"><span>🛑 止损线(撤离)</span><span class="down">≤ ${fmt(h.stop_price)}</span></div>
-      <div class="row"><span>🟢 补仓区1/2</span><span class="up">≤ ${fmt(h.add1_price)} / ${fmt(h.add2_price)}</span></div>
-      <div class="row"><span>✅ 止盈线</span><span class="up">≥ ${fmt(h.take_price)}</span></div>
-      <div class="row"><span>⛰ 压力位</span><span class="up">≈ ${fmt(h.pressure)}</span></div>
-      <div class="row"><span>涨停 / 跌停</span><span>${fmt(h.limit_up)} / ${fmt(h.limit_down)}</span></div>
-      <div class="row"><span>换手 / 振幅</span><span>${fmt(h.turnover)}% / ${fmt(h.amplitude)}%</span></div>
-      <div style="margin-top:8px">${badges||'<span class="badge b-muted">正常</span>'}</div>
+    H.innerHTML+=`<div class="card ${pc}">
+      <h3><span>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span>${secChip}</h3>
+      <div style="margin:2px 0 4px"><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pc}">${sign(h.pct)}%</span></div>
+      <div class="grp">盈亏概览</div>
+      <div class="row"><span class="lbl">持仓市值</span><span class="${showMoney?'':'masked'}">${mval(h.value)}</span></div>
+      <div class="row"><span class="lbl">浮动盈亏</span><span class="${showMoney?'':'masked'} ${cls(h.pnl)}">${showMoney?sign(h.pnl)+'元':mask(0)} (${showMoney?sign(h.pnl_pct)+'%':mask(0)})</span></div>
+      <div class="row"><span class="lbl">当日盈亏</span><span class="${showMoney?'':'masked'} ${cls(h.day_pnl)}">${showMoney?sign(h.day_pnl)+'元':mask(0)} (${showMoney?sign(h.day_pnl_pct)+'%':mask(0)})<span class="note" style="margin-left:6px">·基${h.day_basis}</span></span></div>
+      <div class="row"><span class="lbl">成本 / 股数</span><span class="${showMoney?'':'masked'}">${showMoney?fmt(h.cost,3):'***'} / ${h.shares}股</span></div>
+      <div class="row"><span class="lbl">📅 持仓时长</span><span>${h.holding_days!=null?h.holding_days+' 天':'--'}${h.buy_date?' · '+h.buy_date:''}</span></div>
+      <div class="grp">风控线</div>
+      <div class="row"><span class="lbl">🛑 止损线</span><span class="down">≤ ${fmt(h.stop_price)}</span></div>
+      <div class="row"><span class="lbl">🟢 补仓区</span><span class="up">≤ ${fmt(h.add1_price)} / ${fmt(h.add2_price)}</span></div>
+      <div class="row"><span class="lbl">✅ 止盈线</span><span class="up">≥ ${fmt(h.take_price)}</span></div>
+      <div class="row"><span class="lbl">⛰ 压力位</span><span class="up">≈ ${fmt(h.pressure)}</span></div>
+      <div class="grp">盘面</div>
+      <div class="row"><span class="lbl">涨停 / 跌停</span><span>${fmt(h.limit_up)} / ${fmt(h.limit_down)}</span></div>
+      <div class="row"><span class="lbl">换手 / 振幅</span><span>${fmt(h.turnover)}% / ${fmt(h.amplitude)}%</span></div>
+      <div style="margin-top:10px">${badges||'<span class="badge b-muted">正常</span>'}</div>
     </div>`;
   });
   // 指数

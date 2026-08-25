@@ -92,3 +92,27 @@ fi
 echo "==> [2/2] 调用发布脚本部署..."
 cd "$BASE_DIR" || exit 1
 node "$PUBLISH_JS" --dir "$BASE_DIR"
+
+echo "==> [3/3] 提交并推送到 GitHub (每次迭代即同步)..."
+VER=$(grep -o 'VERSION = "[^"]*"' "$BASE_DIR/app.py" | head -1 | sed 's/VERSION = "//;s/"//')
+git add README.md app.py dashboard_snapshot.html deploy.sh
+if git diff --cached --quiet; then
+  echo "  ✓ 无源码变更, 跳过提交"
+else
+  git commit -q -m "auto: $VER 迭代发布" && echo "  ✓ 已提交 ($VER)"
+  PUSHED=0
+  for i in 1 2 3 4 5 6; do
+    out=$(GIT_TERMINAL_PROMPT=0 git push -u origin master 2>&1); rc=$?
+    if echo "$out" | grep -qiE "fetch first|rejected"; then
+      echo "  ! 远端有本地没有的提交(fetch first), 停止自动推送(请先 git pull --rebase)"; break
+    fi
+    if [ "$rc" -eq 0 ] && echo "$out" | grep -qiE "master -> master|\[new branch\]|Everything up-to-date"; then
+      echo "  ✓ 已推送到 GitHub ($VER)"; PUSHED=1; break
+    fi
+    if echo "$out" | grep -qiE "Bad credentials|Invalid username|Repository not found"; then
+      echo "  ! 认证/仓库错误, 停止推送:"; echo "$out" | tail -3; break
+    fi
+    echo "  ! 第 $i 次推送失败(TLS瞬时重置?), 3s后重试"; sleep 3
+  done
+  [ "$PUSHED" = 0 ] && echo "  ⚠️ 推送未成功, 请检查网络/凭据(代码已提交本地)"
+fi
