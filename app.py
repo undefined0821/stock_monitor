@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.8.0"
+VERSION = "v3.9.0"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -127,6 +127,55 @@ STOCK_SECTOR = {
     "600613": "医药卫生",   # 神奇制药(制药)
 }
 _SECTOR_NAME_TO_CODE = {nm: c for c, nm in SECTOR_BOARDS}
+
+# 细分题材(主题)注册表: 每个题材由若干代表性成分股组成。
+# 题材涨跌 = 成分股当日平均涨跌幅(实时, 来自腾讯行情)。
+# 用途: ①持仓卡片角落"所属题材涨跌"芯片(任一持仓命中题材即自动显示, 无需手动填板块);
+#       ②"题材拉/踩指数"(题材相对大盘偏离, 识别拉动/压制大盘的细分主线)。
+# 相比原 12 个中证行业指数, 题材更贴近个股关联度(如 CPO/PCB/纸业/白酒 等)。
+# 新增持仓若命中任一题材, 即自动显示芯片。腾讯个股行情不含行业字段, 故此处手工归类。
+THEMES = [
+    ("白酒",       ["600519","000858","000568","600809","002304","000596","603369","000860"]),
+    ("造纸",       ["000488","002078","600966","600567","600963","002511"]),
+    ("CPO光模块",   ["300308","300502","300394","002281","603083","000988","301165","300570","300620"]),
+    ("PCB",        ["002463","002916","300476","600183","603228","002384","300903","002938"]),
+    ("光纤光缆",    ["600522","600487","601869","600105","002491"]),
+    ("数字货币",    ["002657","603123","300468","002104","300579","003029","300348","000555"]),
+    ("消费电子",    ["000049","002241","300136","002475","300433","601231","300115"]),
+    ("智慧交通",    ["002401","002373","300212","300020","002869"]),
+    ("环保",       ["600475","603903","300190","002573","000820","601330"]),
+    ("氢能源",     ["600475","002733","300228","002639","300435","002274"]),
+    ("中药",       ["600613","000538","600085","000999","600976","002603","600329","000423"]),
+    ("创新药",     ["600276","300760","300347","002821","600196","688180"]),
+    ("半导体",     ["688981","603986","002049","603501","300661","688041","688256","002371"]),
+    ("光伏",       ["601012","300274","002129","600438","688599","002459","300316"]),
+    ("锂电池",     ["002594","300750","300014","002460","300207","002340"]),
+    ("新能源车",   ["601127","600104","000625","601633","300750"]),
+    ("军工",       ["600893","000768","002179","600760","000661","601989"]),
+    ("AI算力",     ["000977","002415","600588","300454","603019","300308","603220"]),
+    ("机器人",     ["300124","002472","688017","300276","002031"]),
+    ("食品饮料",   ["600887","603288","000895","605499","300999"]),
+    ("银行",       ["601398","600036","601166","600000","601328"]),
+    ("证券",       ["600030","600837","601211","000776","600999"]),
+    ("房地产",     ["000002","600048","001979","600606"]),
+    ("化工",       ["600309","002493","600426","002648","600989"]),
+    ("有色",       ["601600","603993","600362","600219","000630"]),
+    ("煤炭",       ["601088","600188","601225","600348"]),
+    ("电力",       ["600900","600025","601985","600011","600674"]),
+    ("家电",       ["000333","000651","600690","002032","603515"]),
+    ("通信",       ["600050","601728","600941","000063","603220"]),
+    ("软件",       ["300339","300598","002410","300674","002230","000555"]),
+    ("传媒",       ["300413","002555","300418","603444"]),
+    ("农业",       ["002714","300498","600598","002311"]),
+    ("钢铁",       ["600019","000709","600808"]),
+    ("航运港口",   ["601919","601866","600428","601872"]),
+    ("工程机械",   ["000157","600031","000528"]),
+]
+# 股票代码 -> 题材列表(可多归属), 用于持仓卡片芯片自动识别
+STOCK_THEMES = {}
+for _tn, _ms in THEMES:
+    for _c in _ms:
+        STOCK_THEMES.setdefault(_c, []).append(_tn)
 
 STATE = {
     "latest": None, "last_update": None, "trading": False,
@@ -356,15 +405,7 @@ def enrich_holding(h, q):
     if 0 < dist_limit_up <= PREOPEN_CFG.get("strong_limit_dist_pct", 2):
         anomalies.append(("danger", f"逼近涨停 仅差{dist_limit_up:.2f}%"))
 
-    # 持仓时长: 按买入日期自动计算天数
     buy_date = h.get("buy_date", "")
-    holding_days = None
-    if buy_date:
-        try:
-            bd = datetime.datetime.strptime(buy_date, "%Y-%m-%d").date()
-            holding_days = (beijing_now().date() - bd).days
-        except Exception:
-            holding_days = None
 
     return {
         "name": h.get("name") or d.get("name") or h.get("code", ""), "code": h["code"], "market": h["market"],
@@ -386,7 +427,7 @@ def enrich_holding(h, q):
         "at_take": price >= take_price, "at_pressure": price >= pressure,
         "anomalies": [{"level": l, "text": t} for l, t in anomalies],
         "sector_code": h.get("sector_code"), "sector_name": h.get("sector_name"),
-        "buy_date": buy_date, "holding_days": holding_days,
+        "buy_date": buy_date,
     }
 
 
@@ -1256,7 +1297,9 @@ def build_snapshot():
     icodes = [c for c, _ in INDICES]
     scodes = [c for c, _ in SECTOR_BOARDS]
     wcodes = [(w["market"] + w["code"]).lower() for w in WATCHLIST]
-    q = fetch_tencent(list(dict.fromkeys(hcodes + icodes + scodes + wcodes)))
+    # 细分题材成分股(用于卡片芯片 + 题材拉/踩指数)
+    tcodes = [(_market_prefix(c) + c).lower() for c in STOCK_THEMES]
+    q = fetch_tencent(list(dict.fromkeys(hcodes + icodes + scodes + wcodes + tcodes)))
 
     holdings = [enrich_holding(h, q) for h in HOLDINGS]
     indices = []
@@ -1272,17 +1315,48 @@ def build_snapshot():
         if d["price"]:
             sectors.append({"name": nm, "code": c, "pct": round(d["pct"], 2)})
     sectors.sort(key=lambda x: x["pct"], reverse=True)
-    # 为每只持仓附加"所属板块涨跌 + 在全板块中的强弱排名", 供卡片角落芯片展示
-    _sec_by_code = {s["code"]: s for s in sectors}
-    _sec_rank = {s["code"]: i + 1 for i, s in enumerate(sectors)}  # 1=最强
+    _sec_pct_by_name = {s["name"]: s["pct"] for s in sectors}
+
+    # 细分题材涨跌: 题材 = 成分股当日平均涨跌幅(实时, 来自腾讯行情);
+    # 比 12 个中证行业指数更贴近个股关联主线(如 CPO/PCB/纸业/白酒 等)。
+    themes = []
+    for tname, members in THEMES:
+        ps = []
+        for m in members:
+            d = parse_row(q.get((_market_prefix(m) + m).upper(), []))
+            if d["price"] and d.get("pct") is not None:
+                ps.append(d["pct"])
+        if ps:
+            themes.append({"name": tname, "code": "TH:" + tname,
+                           "pct": round(sum(ps) / len(ps), 2), "n": len(ps)})
+    themes.sort(key=lambda x: x["pct"], reverse=True)
+    _theme_by_code = {t["code"]: t for t in themes}
+    _theme_rank = {t["code"]: i + 1 for i, t in enumerate(themes)}  # 1=最强
+
+    # 为每只持仓附加"所属题材涨跌 + 在题材中的强弱排名", 供卡片角落芯片展示。
+    # 优先细分子题(任一持仓命中题材即自动显示芯片); 未命中题材时回退宽泛行业(STOCK_SECTOR)。
     for h in holdings:
-        if h.get("error") or not h.get("sector_code"):
+        if h.get("error"):
             continue
-        sc = _sec_by_code.get(h["sector_code"])
-        if sc:
-            h["sector_pct"] = sc["pct"]
-            h["sector_rank"] = _sec_rank.get(h["sector_code"])
-            h["sector_total"] = len(sectors)
+        tlist = STOCK_THEMES.get(h["code"])
+        if not tlist:
+            broad = STOCK_SECTOR.get(h["code"])
+            tlist = [broad] if broad else None
+        if not tlist:
+            continue
+        tname = tlist[0]
+        tc = "TH:" + tname
+        tt = _theme_by_code.get(tc)
+        if tt is not None:
+            h["theme_name"] = tname
+            h["theme_pct"] = tt["pct"]
+            h["theme_rank"] = _theme_rank.get(tc)
+            h["theme_total"] = len(themes)
+        elif tname in _sec_pct_by_name:
+            h["theme_name"] = tname
+            h["theme_pct"] = _sec_pct_by_name[tname]
+            h["theme_rank"] = None
+            h["theme_total"] = None
     up = [s for s in sectors if s["pct"] > 0]
     avg = sum(s["pct"] for s in sectors) / len(sectors) if sectors else 0
     bias = ("资金偏流入/板块上升" if avg > 0.3
@@ -1308,7 +1382,7 @@ def build_snapshot():
     return {
         "beijing": now.strftime("%Y-%m-%d %H:%M:%S"), "weekday": now.weekday(),
         "trading": trading, "phase": phase, "is_weekday": wd,
-        "indices": indices, "sectors": sectors,
+        "indices": indices, "sectors": sectors, "themes": themes,
         "sector_up_count": len(up), "sector_down_count": len(sectors) - len(up),
         "sector_avg": round(avg, 2), "sector_bias": bias,
         "retail_pnl": retail_pnl,
@@ -1327,19 +1401,20 @@ def build_snapshot():
 
 # ----------------------------- 主题材拉/踩指数 -----------------------------
 def detect_sector_drivers(snap):
-    """识别哪些主题材在拉抬/压制大盘指数(每10分钟检测一次)。
+    """识别哪些细分题材在拉抬/压制大盘指数(每10分钟检测一次)。
 
-    逻辑: 以主要指数(上证)涨跌幅为基准, 计算各行业板块相对大盘的偏离度。
+    逻辑: 以主要指数(上证)涨跌幅为基准, 计算各细分题材(成分股平均涨跌)相对大盘的偏离度。
     偏离明显为正 = 拉指数(贡献上行), 偏离明显为负 = 踩指数(拖累下行)。
+    题材比 12 个中证行业更细(如 CPO/PCB/纸业/白酒 等), 更贴近个股主线。
     """
     idx = next((i for i in snap["indices"] if i["code"] == "sh000001"), None)
     base = idx["pct"] if idx else 0
-    sectors = snap.get("sectors", [])
-    if not sectors:
-        return {"error": "板块数据缺失"}
+    themes = snap.get("themes", [])
+    if not themes:
+        return {"error": "题材数据缺失"}
     TH = 0.8  # 相对大盘的明显异动阈值(百分点)
     rows = []
-    for s in sectors:
+    for s in themes:
         dev = round(s["pct"] - base, 2)
         rows.append({"name": s["name"], "code": s["code"],
                      "pct": s["pct"], "dev": dev})
@@ -1354,7 +1429,7 @@ def detect_sector_drivers(snap):
         "pullers": pullers,
         "pressers": pressers,
         "threshold": TH,
-        "note": f"以{idx['name'] if idx else '上证指数'}涨跌幅为基准, 板块相对大盘偏离≥{TH}%视为明显异动; 拉=正向拉动指数, 踩=负向压制指数",
+        "note": f"以{idx['name'] if idx else '上证指数'}涨跌幅为基准, 细分题材(成分股平均涨跌)相对大盘偏离≥{TH}%视为明显异动; 拉=正向拉动指数, 踩=负向压制指数",
     }
 
 
@@ -2437,23 +2512,23 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
 .tag{font-size:12px;color:var(--mut);padding:3px 10px;border:1px solid var(--line);border-radius:20px}
 .tag.live{color:var(--up);border-color:var(--up);background:rgba(239,83,80,.08)}
 .wrap{max-width:1280px;margin:0 auto;padding:20px 18px 64px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
-.card{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:14px;
-  padding:16px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:12px}
+.card{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:12px;
+  padding:12px 12px 11px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.18)}
 .card:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.30);border-color:#3d4756}
 .card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
 .card.up::before{background:var(--up)}.card.down::before{background:var(--down)}
-.card h3{margin:0 0 2px;font-size:15px;font-weight:600;display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
+.card h3{margin:0 0 2px;font-size:14.5px;font-weight:600;display:flex;justify-content:space-between;align-items:flex-start;gap:8px}
 .code{color:var(--mut);font-size:12px;font-weight:normal;letter-spacing:.3px}
-.px{font-size:30px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
-.pct{font-size:15px;font-weight:600;margin-left:8px;font-variant-numeric:tabular-nums}
+.px{font-size:25px;font-weight:700;line-height:1.05;font-variant-numeric:tabular-nums}
+.pct{font-size:13.5px;font-weight:600;margin-left:7px;font-variant-numeric:tabular-nums}
 .up{color:var(--up)}.down{color:var(--down)}.flat{color:var(--mut)}
-.sector-chip{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;font-size:11px;line-height:1;
-  padding:5px 9px;border-radius:999px;border:1px solid var(--line);background:var(--row-line);color:var(--mut);white-space:nowrap}
+.sector-chip{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;font-size:10.5px;line-height:1;
+  padding:3px 8px;border-radius:999px;border:1px solid var(--line);background:var(--row-line);color:var(--mut);white-space:nowrap}
 .sector-chip .sp{font-weight:700;font-variant-numeric:tabular-nums}
-.sector-chip .rk{opacity:.65;font-size:10px}
-.grp{margin:12px 0 2px;font-size:11px;letter-spacing:1.5px;color:var(--mut);text-transform:uppercase;border-top:1px solid var(--row-line);padding-top:9px}
-.row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--row-line);font-size:13px}
+.sector-chip .rk{opacity:.65;font-size:9.5px}
+.grp{margin:8px 0 2px;font-size:10.5px;letter-spacing:1.2px;color:var(--mut);text-transform:uppercase;border-top:1px solid var(--row-line);padding-top:7px}
+.row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--row-line);font-size:12.5px}
 .row .lbl{color:var(--mut)}
 .row:last-of-type{border-bottom:none}
 .row span:last-child{font-variant-numeric:tabular-nums;font-weight:500}
@@ -2548,7 +2623,7 @@ td:first-child,th:first-child{text-align:left}
   <div class="section">🌐 大盘 & 板块资金动向</div>
   <div class="grid">
     <div class="card"><h3>三大指数</h3><table id="idx"></table></div>
-    <div class="card"><h3>行业板块涨跌 <span class="code" id="sb2"></span></h3>
+    <div class="card"><h3>题材涨跌（细分主线） <span class="code" id="sb2"></span></h3>
       <div id="sectors" style="max-height:300px;overflow:auto"></div>
       <div class="note" id="bias"></div>
     </div>
@@ -2711,19 +2786,19 @@ function render(d){
   // 已清仓统计模块(按用户要求不展示): 数据保留在 snapshot 中, 仅不渲染卡片
   (d.holdings||[]).forEach(h=>{
     if(h.error){H.innerHTML+='<div class="card"><h3>'+h.name+' <span class="code">'+h.code+'</span></h3><div class="note">'+h.error+'</div></div>';return;}
-    const pc=cls(h.pct);
-    // 角落板块芯片: 所属板块名 + 板块涨跌幅 + 全板块强弱排名(板块整体涨跌, 非成分股家数比例)
-    const secChip = h.sector_name ? `<span class="sector-chip" title="所属板块行情涨跌">${h.sector_name} <span class="sp ${cls(h.sector_pct)}">${sign(h.sector_pct)}%</span>${h.sector_rank?'<span class="rk">'+h.sector_rank+'/'+(h.sector_total||'')+'</span>':''}</span>` : '';
+    const pc=cls(h.pnl);      // 卡片主色: 以成本价 vs 实时价(盈亏)为基准, 不基于昨日价
+    const pcd=cls(h.pct);     // 当日涨跌%: 以昨收为基准(独立于卡片主色)
+    // 角落题材芯片: 所属细分题材名 + 题材平均涨跌幅 + 题材强弱排名(命中题材即自动显示)
+    const secChip = h.theme_name ? `<span class="sector-chip" title="所属题材涨跌(成分股平均)">${h.theme_name} <span class="sp ${cls(h.theme_pct)}">${sign(h.theme_pct)}%</span>${h.theme_rank?'<span class="rk">'+h.theme_rank+'/'+(h.theme_total||'')+'</span>':''}</span>` : '';
     let badges=(h.anomalies||[]).map(a=>'<span class="badge b-'+a.level+'">'+a.text+'</span>').join('');
     H.innerHTML+=`<div class="card ${pc}">
       <h3><span>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span>${secChip}</h3>
-      <div style="margin:2px 0 4px"><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pc}">${sign(h.pct)}%</span></div>
+      <div style="margin:2px 0 4px"><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pcd}">${sign(h.pct)}%</span></div>
       <div class="grp">盈亏概览</div>
       <div class="row"><span class="lbl">持仓市值</span><span class="${showMoney?'':'masked'}">${mval(h.value)}</span></div>
       <div class="row"><span class="lbl">浮动盈亏</span><span class="${showMoney?'':'masked'} ${cls(h.pnl)}">${showMoney?sign(h.pnl)+'元':mask(0)} (${showMoney?sign(h.pnl_pct)+'%':mask(0)})</span></div>
       <div class="row"><span class="lbl">当日盈亏</span><span class="${showMoney?'':'masked'} ${cls(h.day_pnl)}">${showMoney?sign(h.day_pnl)+'元':mask(0)} (${showMoney?sign(h.day_pnl_pct)+'%':mask(0)})<span class="note" style="margin-left:6px">·基${h.day_basis}</span></span></div>
       <div class="row"><span class="lbl">成本 / 股数</span><span class="${showMoney?'':'masked'}">${showMoney?fmt(h.cost,3):'***'} / ${h.shares}股</span></div>
-      <div class="row"><span class="lbl">📅 持仓时长</span><span>${h.holding_days!=null?h.holding_days+' 天':'--'}${h.buy_date?' · '+h.buy_date:''}</span></div>
       <div class="grp">风控线</div>
       <div class="row"><span class="lbl">🛑 止损线</span><span class="down">≤ ${fmt(h.stop_price)}</span></div>
       <div class="row"><span class="lbl">🟢 补仓区</span><span class="up">≤ ${fmt(h.add1_price)} / ${fmt(h.add2_price)}</span></div>
@@ -2739,10 +2814,12 @@ function render(d){
   let it='<tr><th>指数</th><th>点位</th><th>涨跌幅</th></tr>';
   (d.indices||[]).forEach(i=>{it+=`<tr><td>${i.name}</td><td>${fmt(i.price)}</td><td class="${cls(i.pct)}">${sign(i.pct)}%</td></tr>`;});
   document.getElementById('idx').innerHTML=it;
-  // 板块
-  document.getElementById('sb2').textContent='↑'+d.sector_up_count+' ↓'+d.sector_down_count+' 均值'+sign(d.sector_avg)+'%';
+  // 题材(细分)涨跌: 取代宽泛的 12 个中证行业, 更贴近个股关联主线
+  const ths=d.themes||[];
+  const tavg=ths.length?ths.reduce((a,b)=>a+b.pct,0)/ths.length:0;
+  document.getElementById('sb2').textContent='↑'+ths.filter(x=>x.pct>0).length+' ↓'+ths.filter(x=>x.pct<0).length+' 均值'+sign(Math.round(tavg*100)/100)+'%';
   let s='';
-  (d.sectors||[]).forEach(x=>{const w=Math.min(Math.abs(x.pct)*6,100);s+=`<div style="margin:5px 0"><span style="display:inline-block;width:64px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span></div>`;});
+  ths.forEach(x=>{const w=Math.min(Math.abs(x.pct)*6,100);s+=`<div style="margin:5px 0"><span style="display:inline-block;width:72px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span><span class="note" style="margin-left:4px">${x.n}股</span></div>`;});
   document.getElementById('sectors').innerHTML=s;
   document.getElementById('bias').textContent=d.sector_bias;
   // 散户今日平均盈亏(国证2000近似) —— 紧凑版
