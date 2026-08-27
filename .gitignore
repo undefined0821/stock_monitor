@@ -25,3 +25,4 @@ gapup_stats.json
 gapup_weights_tuned.json
 # 首发默认模板(保留在 git, 用于服务首次启动且文件缺失时自愈)
 !portfolio.json.example
+stock_classify.json
