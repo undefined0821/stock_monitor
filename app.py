@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.9.4"
+VERSION = "v3.9.5"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -491,26 +491,29 @@ def enrich_holding(h, q):
     value = price * shares
     pnl = (price - cost) * shares
     pnl_pct = (price - cost) / cost * 100 if cost else 0
-    # 当日盈亏口径: 以"最后买入日(last_buy_date)"为判定依据
-    #   - 今天有买入动作(首买 / 加仓 / 改仓, last_buy_date==今天): 基于买入成本(=cost)
-    #     因为今天才发生买入, 昨日收盘时并未持有(或持仓结构已变), 用昨收算当日盈亏无意义
-    #   - 之前买入且之后未动(last_buy_date 为历史日期): 基于上一交易日收盘价(=昨收)
+    # 当日盈亏口径: 分段计算(开盘前持仓 vs 今日加仓), 避免加仓抹除加仓前已有收益。
+    #   open_shares = 今日开盘前持有的股数(加仓前基准);
+    #     由系统在每日开盘时快照重置, 盘中加仓时自动把"加仓前股数"记为 open_shares。
+    #   - 开盘前部分(<=open_shares): 昨日收盘已持有, 当日盈亏基于上一交易日收盘价(=昨收)
+    #   - 今日加仓部分(>open_shares): 今日才买入, 基于加权成本(=cost, 即追高成本)
+    #   这样加仓不会抹除加仓前 1200 股等的当日收益, 也不会把加仓亏损算成昨收收益。
     #   浮动盈亏(pnl)始终基于成本价, 与当日盈亏口径无关。
-    #   last_buy_date 为空时默认视为"今天买入"(前端每次保存都会写入今天, 故新增/加仓必为今天)。
-    _lbd = None
-    if h.get("last_buy_date") or h.get("buy_date"):
-        _raw = h.get("last_buy_date") or h.get("buy_date")
-        try:
-            _lbd = datetime.datetime.strptime(_raw, "%Y-%m-%d").date()
-        except Exception:
-            _lbd = None
-    is_today_buy = (_lbd is None) or (_lbd == beijing_now().date())
-    if is_today_buy:
-        prev = cost  # 当日新买入/加仓: 以买入成本为基准
+    try:
+        os_ = max(0.0, min(float(h.get("open_shares") or 0), shares))
+    except Exception:
+        os_ = 0.0
+    prevclose = d["prevclose"] if d["prevclose"] > 0 else cost
+    open_part = (price - prevclose) * os_               # 开盘前持仓: 昨收基准
+    add_part = (price - cost) * (shares - os_)          # 今日加仓: 成本基准
+    day_pnl = open_part + add_part
+    denom = prevclose * os_ + cost * (shares - os_)
+    day_pnl_pct = day_pnl / denom * 100 if denom else 0
+    if os_ <= 0:
+        day_basis_label = "成本"      # 无开盘前持仓(今日首买/全加仓)
+    elif os_ >= shares:
+        day_basis_label = "昨收"      # 开盘前即持有全部, 当日未加仓
     else:
-        prev = d["prevclose"] if d["prevclose"] > 0 else cost
-    day_pnl = (price - prev) * shares
-    day_pnl_pct = (price - prev) / prev * 100 if prev else 0
+        day_basis_label = "混合"      # 开盘前部分+今日加仓, 分段计算
 
     stop_loss = h.get("stop_loss_pct", 8.0)
     add1 = h.get("add1_pct", 5.0)
@@ -562,7 +565,7 @@ def enrich_holding(h, q):
         "cost": cost, "shares": shares,
         "value": round(value, 2), "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
         "day_pnl": round(day_pnl, 2), "day_pnl_pct": round(day_pnl_pct, 2),
-        "day_basis": "成本" if is_today_buy else "昨收",  # is_today_buy 已在上文定义
+        "day_basis": day_basis_label,
 
         "limit_up": round(d["limit_up"], 2), "limit_down": round(d["limit_down"], 2),
         "turnover": round(d["turnover"], 2), "amplitude": round(d["amplitude"], 2),
@@ -774,6 +777,10 @@ def _normalize_holdings(raw):
             "cost": float(h.get("cost", 0) or 0),
             "buy_date": str(h.get("buy_date", "")).strip(),
             "last_buy_date": str(h.get("last_buy_date", "")).strip(),
+            # 今日开盘前持有股数(加仓前基准): 用于当日盈亏分段计算,
+            # 由系统在每日开盘重置 + 盘中加仓时自动记录, 无需手动维护。
+            "open_shares": float(h.get("open_shares", 0) or 0),
+            "open_date": str(h.get("open_date", "")).strip(),
             "name": str(h.get("name", "")).strip(),
             # 题材自动归类结果(前端新增持仓保存时写入, 启动后台线程补齐存量); 为空则回退 STOCK_THEMES/STOCK_SECTOR
             "theme": str(h.get("theme", "")).strip(),
@@ -801,6 +808,48 @@ def reload_holdings():
         cfg = json.load(f)
     with _HOLD_LOCK:
         HOLDINGS = _normalize_holdings(cfg.get("holdings", []))
+
+
+def persist_holdings():
+    """将当前 HOLDINGS(含 open_shares/open_date 等运行时字段)写回 portfolio.json。"""
+    with _HOLD_LOCK:
+        rows = [dict(h) for h in HOLDINGS]
+    try:
+        with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cfg["holdings"] = rows
+    tmp = PORTFOLIO_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, PORTFOLIO_PATH)
+    reload_holdings()
+
+
+def reset_open_basis_if_new_day():
+    """每日开盘基准重置: 检测到新交易日时, 把各持仓的 open_shares 重置为当前 shares。
+
+    这样"开盘前持有量"始终以当天开盘为锚; 用户盘中加仓时再单独把 open_shares
+    记为加仓前股数(见 /api/portfolio 保存逻辑), 实现当日盈亏分段计算。
+    今天已手动指定的 open_shares(如加仓后的中贝)因 open_date==今天不会被覆盖。"""
+    global HOLDINGS
+    today = beijing_now().date().strftime("%Y-%m-%d")
+    if getattr(reset_open_basis_if_new_day, "_date", None) == today:
+        return
+    reset_open_basis_if_new_day._date = today
+    changed = False
+    with _HOLD_LOCK:
+        for h in HOLDINGS:
+            if h.get("open_date") != today:
+                h["open_shares"] = h["shares"]
+                h["open_date"] = today
+                changed = True
+    if changed:
+        try:
+            persist_holdings()
+        except Exception:
+            pass
 
 
 def _backfill_themes():
@@ -1508,6 +1557,7 @@ def _start_close_build():
 
 # ----------------------------- 快照 -----------------------------
 def build_snapshot():
+    reset_open_basis_if_new_day()  # 每日开盘基准重置(新交易日才生效)
     now = beijing_now()
     wd = is_weekday(now)
     trading, phase = trading_phase(now)
@@ -2696,6 +2746,16 @@ def api_portfolio():
             today_str = beijing_now().strftime("%Y-%m-%d")
             item.setdefault("buy_date", today_str)
             item["last_buy_date"] = today_str
+            item["open_date"] = today_str
+            # 加仓检测: 若本次保存股数 > 原持仓股数, 把"加仓前股数"记为 open_shares,
+            # 使当日盈亏分段(开盘前部分按昨收, 加仓部分按成本), 不抹除加仓前收益。
+            # 首买(无原有持仓) open_shares=0(全按成本); 未加仓则保留原 open_shares。
+            if code not in existing:
+                item["open_shares"] = 0.0
+            else:
+                old_shares = float(existing[code].get("shares", 0) or 0)
+                if shares > old_shares:
+                    item["open_shares"] = round(old_shares, 2)
             new_holdings.append(item)
         # 题材自动归类: 对缺失题材且不在手工 STOCK_THEMES 表的持仓(含新增),
         # 通过东方财富行业 + 名称自动识别, 写回 theme 字段(前端新增即自动显示芯片)。
