@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.9.1"
+VERSION = "v3.9.2"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -147,6 +147,7 @@ THEMES = [
     ("氢能源",     ["600475","002733","300228","002639","300435","002274"]),
     ("中药",       ["600613","000538","600085","000999","600976","002603","600329","000423"]),
     ("创新药",     ["600276","300760","300347","002821","600196","688180"]),
+    ("原料药/CDMO", ["603538","600521","002399","300702","605507"]),
     ("半导体",     ["688981","603986","002049","603501","300661","688041","688256","002371"]),
     ("光伏",       ["601012","300274","002129","600438","688599","002459","300316"]),
     ("锂电池",     ["002594","300750","300014","002460","300207","002340"]),
@@ -2472,6 +2473,10 @@ def api_portfolio():
             item["code"] = code
             item["cost"] = round(cost, 3)
             item["shares"] = round(shares, 2)
+            # 前端新增的持仓: 默认买入日期为今天, 使"当日盈亏"基于成本(非昨收)。
+            # 已有持仓(在 existing 中)保留其原 buy_date, 维持隔夜口径, 不回退为今天。
+            if code not in existing:
+                item.setdefault("buy_date", beijing_now().strftime("%Y-%m-%d"))
             new_holdings.append(item)
         if not new_holdings:
             return jsonify({"ok": False, "error": "至少保留一只持仓(股票代码不能为空)"}), 400
@@ -2573,6 +2578,14 @@ td:first-child,th:first-child{text-align:left}
 .gv-gap{font-weight:600;min-width:52px;text-align:right}
 .gv-res{font-size:12px;width:16px;text-align:center}
 .gv-res.up{color:var(--up)}.gv-res.down{color:var(--down)}
+/* 近5次自动调参变化(紧凑) */
+.gv-opt{margin-top:8px;padding-top:7px;border-top:1px solid var(--row-line)}
+.gv-opt-h{font-size:11px;color:var(--mut);letter-spacing:.5px;margin-bottom:3px}
+.gv-opt-row{display:flex;align-items:baseline;gap:8px;font-size:11px;padding:1px 0;flex-wrap:wrap}
+.gv-opt-date{color:var(--mut);font-variant-numeric:tabular-nums}
+.gv-opt-auc{font-weight:600;font-variant-numeric:tabular-nums}
+.gv-opt-auc.up{color:var(--up)}.gv-opt-auc.down{color:var(--down)}
+.gv-opt-delta{color:var(--mut);font-variant-numeric:tabular-nums;opacity:.9}
 .prob{font-size:24px;font-weight:700}
 .gauge{display:inline-block;font-size:22px;font-weight:700}
 .eye{cursor:pointer;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:16px;padding:4px 10px;line-height:1}
@@ -2668,8 +2681,6 @@ td:first-child,th:first-child{text-align:left}
   <!-- 7.1 高开回测(v3.4) -->
   <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
     <span>📊 高开回测（推荐→开盘实测）</span>
-    <button onclick="gapOpt()" style="background:var(--card);color:var(--mut);border:1px solid var(--line);padding:2px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;margin-left:auto">⚙️ 调权</button>
-    <span id="gapOptTip" class="code"></span>
   </div>
   <div class="card gv-card" id="gapverify"><div class="note">加载中…</div></div>
   <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
@@ -2917,22 +2928,27 @@ function renderGapVerify(d){
       +`</div>`;
   });
   r+='</div>';
-  box.innerHTML=r;
-}
-
-function gapOpt(){
-  const tip=document.getElementById('gapOptTip');
-  if(tip)tip.textContent='调权中(需≥样本阈值)…';
-  fetch('/api/gapup/optimize',{method:'POST'}).then(r=>r.json()).then(res=>{
-    if(tip){
-      if(res.ok){
-        tip.textContent=`✅ 已调权(${res.samples}样本): AUC ${res.auc_before}→${res.auc_after}`;
-      } else {
-        tip.textContent=`ℹ️ ${res.reason||'样本不足'}`;
+  // 近5次自动调参的变化值(紧凑, 非核心): 展示 AUC 趋势 + 变动较大的权重
+  const opts=(d.stats&&d.stats.optimizations)||[];
+  if(opts.length){
+    r+='<div class="gv-opt"><div class="gv-opt-h">近5次自动调参变化</div>';
+    opts.slice(-5).reverse().forEach(o=>{
+      const before=o.before||{}, after=o.after||{};
+      const deltas=[];
+      for(const k in after){
+        const dv=after[k]-before[k];
+        if(Math.abs(dv)>=0.1) deltas.push(`${k.replace('gu_','')} ${before[k].toFixed(1)}→${after[k].toFixed(1)}`);
       }
-    }
-    setTimeout(load,800);
-  }).catch(()=>{if(tip)tip.textContent='调权失败';});
+      const aucUp=(o.auc_after||0)>=(o.auc_before||0);
+      r+=`<div class="gv-opt-row">`
+        +`<span class="gv-opt-date">${o.at?o.at.slice(5,10):''}</span>`
+        +`<span class="gv-opt-auc ${aucUp?'up':'down'}">AUC ${(o.auc_before||0).toFixed(3)}→${(o.auc_after||0).toFixed(3)}</span>`
+        +`<span class="gv-opt-delta">${deltas.length?deltas.join(' · '):'微调'}</span>`
+        +`</div>`;
+    });
+    r+='</div>';
+  }
+  box.innerHTML=r;
 }
 
 function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});}
