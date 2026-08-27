@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.9.0"
+VERSION = "v3.9.1"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -2558,6 +2558,21 @@ td:first-child,th:first-child{text-align:left}
 .feed .it.info{border-color:var(--blue)}
 .feed .t{color:var(--mut);font-size:11px}
 .note{color:var(--mut);font-size:12px;margin-top:6px;line-height:1.5}
+/* 高开回测: 紧凑小卡(非核心内容, 仅展示昨日5只实测) */
+.gv-card{padding:10px 12px !important}
+.gv-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--mut);margin-bottom:6px}
+.gv-head b{color:var(--txt);font-weight:600}
+.gv-hit{font-size:12px;color:var(--mut)}
+.gv-hit b{font-size:14px;color:var(--blue)}
+.gv-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px 12px}
+.gv-item{display:flex;align-items:center;gap:6px;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 0;border-bottom:1px solid var(--row-line)}
+.gv-item:last-child{border-bottom:none}
+.gv-name{flex:1;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gv-prob{color:var(--mut);font-size:11px}
+.gv-prob.up{color:var(--up)}.gv-prob.down{color:var(--down)}
+.gv-gap{font-weight:600;min-width:52px;text-align:right}
+.gv-res{font-size:12px;width:16px;text-align:center}
+.gv-res.up{color:var(--up)}.gv-res.down{color:var(--down)}
 .prob{font-size:24px;font-weight:700}
 .gauge{display:inline-block;font-size:22px;font-weight:700}
 .eye{cursor:pointer;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:16px;padding:4px 10px;line-height:1}
@@ -2651,13 +2666,12 @@ td:first-child,th:first-child{text-align:left}
   </div>
   <div class="card" id="gapup"><div class="note">尚未生成（交易日 14:52 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
   <!-- 7.1 高开回测(v3.4) -->
-  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+  <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
     <span>📊 高开回测（推荐→开盘实测）</span>
-    <span class="code">交易日记录推荐, 次日开盘自动验证是否高开, 累积命中率并自优化权重</span>
-    <button onclick="gapOpt()" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto">⚙️ 手动调优权重</button>
+    <button onclick="gapOpt()" style="background:var(--card);color:var(--mut);border:1px solid var(--line);padding:2px 10px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:500;margin-left:auto">⚙️ 调权</button>
     <span id="gapOptTip" class="code"></span>
   </div>
-  <div class="card" id="gapverify"><div class="note">加载中…</div></div>
+  <div class="card gv-card" id="gapverify"><div class="note">加载中…</div></div>
   <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
   <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">__VERSION__</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
 </div>
@@ -2875,55 +2889,34 @@ function render(d){
   } else gu.innerHTML='<div class="note">尚未生成（交易日 14:52 起自动检测, 可点按钮立即检测）</div>';
 }
 
-// 高开回测(v3.4): 渲染历史记录 + 命中率
+// 高开回测(v3.4): 仅展示最近一次(昨天)推荐的 5 只开盘实测结果, 版面紧凑(非核心内容)
 function renderGapVerify(d){
   const box=document.getElementById('gapverify');
   if(!box) return;
-  const s=d.stats||{};
-  const recs=d.records||[];
-  let r='';
-  const hr=s.hit_rate!=null?Math.round(s.hit_rate*100):0;
-  const tot=s.total||0;
-  const opts=s.optimizations||[];
-  const lastOpt=opts.length?opts[opts.length-1]:null;
-  r+=`<div class="note">累计回测 <b>${tot}</b> 只 ｜ 高开命中率 <b class="${cls(hr)}">${hr}%</b> ｜ 平均预测 <b>${fmt(s.avg_pred,1)}%</b> ｜ 平均实际高开 <b class="${cls(s.avg_actual)}">${fmt(s.avg_actual,2)}%</b> ｜ 自动调权阈值 ≥${d.min_opt_samples}只</div>`;
-  // v3.7: 判别力 AUC 展示(权重自优化目标)
-  if(lastOpt){
-    const up=lastOpt.auc_after>=lastOpt.auc_before;
-    r+=`<div class="sub">🎯 权重自优化(纯启发式·无AI): 判别力 AUC <b>${fmt(lastOpt.auc_before,3)}→${fmt(lastOpt.auc_after,3)}</b> ${up?'📈':'📉'} ｜ ${lastOpt.samples}样本 ｜ ${lastOpt.at?lastOpt.at.slice(5,16):''}</div>`;
-  } else {
-    r+=`<div class="sub">🎯 权重自优化(纯启发式): 累计≥${d.min_opt_samples}只已验证样本后, 自动以 AUC−正则−校准 为目标调权</div>`;
+  const recent=(d.stats&&d.stats.recent)||[];
+  const day=recent[0];  // recent[0] 即最近一次已验证(昨天推荐→今开实测)
+  if(!day||!day.stocks||!day.stocks.length){
+    box.innerHTML='<div class="note">暂无昨日的回测结果。下一交易日 09:30 后自动验证当日推荐的 5 只是否高开。</div>';
+    return;
   }
-  const pending=recs.filter(x=>!x.verified).slice(0,1);
-  if(pending.length){
-    const p=pending[0];
-    // 待回测 = 最近一次 14:52 自动扫描记录(auto), 与「尾盘高开潜力」实时刷新结果天然不同步,
-    // 这是回测闭环语义(T日推荐→T+1开盘实测), 不以"当前实时推荐"为准, 避免误导。
-    const tag=p.source==='manual_baseline'?'·基线(历史推荐)':(p.source==='auto'?'·T日14:52推荐':'');
-    r+=`<div class="sub">🕒 待回测（${p.date}${tag}）：${p.stocks.map(x=>x.code+' '+x.name+'('+fmt(x.prob,1)+'%)').join('、')}</div>`;
-    r+=`<div class="sub" style="font-size:12px;opacity:.8">ℹ️ 待回测为最近一次 14:52 自动扫描结果，与上方「尾盘高开潜力」实时刷新不同步属正常（回测语义：T日推荐 → T+1开盘实测）</div>`;
-  }
-  const recent=s.recent||[];
-  if(recent.length){
-    r+='<table><tr><th>验证日</th><th>代码</th><th>名称</th><th>预测概率</th><th>实际高开%</th><th>结果</th></tr>';
-    recent.forEach(rec=>{
-      (rec.stocks||[]).forEach(x=>{
-        const gp=x.gap_pct;
-        const hit=x.is_gap_up;
-        r+=`<tr><td>${rec.verified_at?rec.verified_at.slice(0,10):rec.date}</td><td>${x.code}</td><td>${x.name}</td><td class="prob ${probcls(x.prob)}">${fmt(x.prob,1)}%</td><td class="${cls(gp)}">${gp==null?'--':(gp>=0?'+':'')+fmt(gp,2)+'%'}</td><td>${hit==null?'--':(hit?'✅ 高开':'❌ 未高开')}</td></tr>`;
-      });
-    });
-    r+='</table>';
-  } else {
-    r+='<div class="note">尚无验证数据。下一交易日 09:30 后自动回测当前推荐的 5 只是否高开。</div>';
-  }
-  // 调权历史(最近3次)
-  if(opts.length){
-    r+='<div class="sub" style="margin-top:6px">📋 调权历史:</div>';
-    opts.slice(-3).reverse().forEach(o=>{
-      r+=`<div class="sub" style="font-size:12px;opacity:.85">· ${o.at?o.at.slice(5,16):''} AUC ${fmt(o.auc_before,3)}→${fmt(o.auc_after,3)} ｜ ${o.samples}样本</div>`;
-    });
-  }
+  const stocks=day.stocks;
+  const hits=stocks.filter(x=>x.is_gap_up).length;
+  const rdate=day.date?day.date.slice(5):'--';          // 推荐日(昨天)
+  const vdate=day.verified_at?day.verified_at.slice(5,10):rdate;  // 实测日
+  let r=`<div class="gv-head"><span>推荐 <b>${rdate}</b> · 今开实测 <b>${vdate}</b></span>`
+       +`<span class="gv-hit">命中 <b>${hits}</b>/${stocks.length}</span></div>`;
+  r+='<div class="gv-list">';
+  stocks.forEach(x=>{
+    const gp=x.gap_pct;
+    const hit=x.is_gap_up;
+    r+=`<div class="gv-item">`
+      +`<span class="gv-name">${x.code} ${x.name}</span>`
+      +`<span class="gv-prob ${probcls(x.prob)}">预${fmt(x.prob,0)}%</span>`
+      +`<span class="gv-gap ${cls(gp)}">${gp==null?'--':(gp>=0?'+':'')+fmt(gp,2)+'%'}</span>`
+      +`<span class="gv-res ${hit?'up':'down'}">${hit?'✅':'❌'}</span>`
+      +`</div>`;
+  });
+  r+='</div>';
   box.innerHTML=r;
 }
 
