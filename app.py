@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.9.2"
+VERSION = "v3.9.3"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -133,7 +133,8 @@ _SECTOR_NAME_TO_CODE = {nm: c for c, nm in SECTOR_BOARDS}
 # 用途: ①持仓卡片角落"所属题材涨跌"芯片(任一持仓命中题材即自动显示, 无需手动填板块);
 #       ②"题材拉/踩指数"(题材相对大盘偏离, 识别拉动/压制大盘的细分主线)。
 # 相比原 12 个中证行业指数, 题材更贴近个股关联度(如 CPO/PCB/纸业/白酒 等)。
-# 新增持仓若命中任一题材, 即自动显示芯片。腾讯个股行情不含行业字段, 故此处手工归类。
+# 新增持仓若命中任一题材, 即自动显示芯片。腾讯个股行情不含行业字段, 故通过东方财富
+# F10 三级行业 + 股票名称自动归类(见 THEME_KEYWORDS / auto_classify), 前端新增持仓无需手动纠错。
 THEMES = [
     ("白酒",       ["600519","000858","000568","600809","002304","000596","603369","000860"]),
     ("造纸",       ["000488","002078","600966","600567","600963","002511"]),
@@ -177,6 +178,146 @@ STOCK_THEMES = {}
 for _tn, _ms in THEMES:
     for _c in _ms:
         STOCK_THEMES.setdefault(_c, []).append(_tn)
+
+# ---------- 题材自动归类(前端新增持仓无需手动纠错) ----------
+# 腾讯个股行情不含行业字段, 故通过东方财富 F10「公司概况」接口(EM2016 三级行业, 如
+# "医药生物-化学制药-化学原料药") + 股票名称, 按下方关键词规则自动匹配到细分题材。
+# 命中即自动显示卡片芯片。分类结果缓存到 stock_classify.json, 避免重复请求。
+# 规则按"细分优先于宽泛"排序(如 原料药/CDMO 先于 创新药, CPO/光纤 先于 通信)。
+CLASSIFY_CACHE_FILE = f"{BASE}/stock_classify.json"
+
+THEME_KEYWORDS = [
+    ("白酒", ["白酒"]),
+    ("原料药/CDMO", ["化学原料药", "CDMO", "原料药", "化学制药", "美诺华", "华海药业", "九洲药业",
+                   "普洛药业", "博腾股份", "凯莱英", "药明康德", "司太立", "奥翔药业", "天宇股份"]),
+    ("创新药", ["创新药", "生物制品", "恒瑞医药", "百济", "信达生物", "君实",
+                "荣昌", "康方"]),
+    ("中药", ["中药"]),
+    ("CPO光模块", ["光模块", "CPO", "中际旭创", "新易盛", "天孚通信", "源杰科技",
+                 "太辰光", "铭普光磁", "光迅科技"]),
+    ("光纤光缆", ["光纤", "光缆", "亨通光电", "中天科技", "长飞光纤", "通鼎互联", "永鼎股份"]),
+    ("PCB", ["PCB", "印刷电路", "沪电股份", "深南电路", "景旺电子", "胜宏科技",
+             "崇达技术", "兴森科技", "东山精密"]),
+    ("半导体", ["半导体", "芯片", "中芯国际", "北方华创", "韦尔股份", "兆易创新",
+                "卓胜微", "紫光国微", "长电科技", "通富微电", "寒武纪", "海光信息",
+                "士兰微", "华润微", "复旦微电"]),
+    ("消费电子", ["消费电子", "歌尔股份", "立讯精密", "蓝思科技", "领益制造",
+                 "环旭电子", "信维通信", "欧菲光", "水晶光电", "电连技术"]),
+    ("光伏", ["光伏", "太阳能", "阳光电源", "隆基绿能", "通威股份", "晶澳科技", "天合光能",
+              "晶科能源", "福莱特", "迈为股份", "爱旭股份"]),
+    ("锂电池", ["电池", "锂", "宁德时代", "亿纬锂能", "国轩高科", "欣旺达",
+                "璞泰来", "恩捷股份", "天赐材料", "先导智能", "当升科技"]),
+    ("新能源车", ["乘用车", "汽车", "长安汽车", "长城汽车", "上汽集团", "广汽集团",
+                  "赛力斯", "比亚迪", "理想", "小鹏", "蔚来"]),
+    ("氢能源", ["氢能源", "氢能", "美锦能源", "潍柴动力"]),
+    ("军工", ["军工", "国防", "中航", "中船", "航发", "洪都航空", "高德红外",
+              "内蒙一机", "航天", "船舶"]),
+    ("AI算力", ["算力", "浪潮信息", "中科曙光", "海康威视", "深信服", "用友网络",
+                "中贝通信", "工业富联", "服务器"]),
+    ("机器人", ["机器人", "汇川技术", "双环传动", "绿的谐波", "三丰智能", "巨轮智能",
+                "埃斯顿", "拓斯达", "减速器"]),
+    ("智慧交通", ["智慧交通", "车联网", "中远海科", "千方科技", "易华录",
+                  "银江技术", "金溢科技"]),
+    ("数字货币", ["数字货币", "数字人民币", "中科金财", "翠微股份", "四方精创",
+                  "恒宝股份", "数字认证", "吉大正元", "长亮科技", "神州信息"]),
+    ("环保", ["环保", "环境治理", "水务", "碧水源", "伟明环保", "瀚蓝环境",
+              "高能环境", "绿茵生态"]),
+    ("食品饮料", ["食品饮料", "食品加工", "伊利股份", "海天味业", "双汇发展",
+                  "农夫山泉", "东鹏饮料", "养元饮品", "安井食品", "绝味食品"]),
+    ("银行", ["银行-", "银行业"]),
+    ("证券", ["证券"]),
+    ("房地产", ["房地产", "地产"]),
+    ("化工", ["基础化工", "化学制品", "化工", "万华化学", "华鲁恒升", "宝丰能源",
+              "扬农化工", "鲁西化工"]),
+    ("有色", ["有色金属", "铝", "铜", "黄金", "中国铝业", "云铝股份", "江西铜业",
+              "紫金矿业", "洛阳钼业", "天齐锂业", "赣锋锂业"]),
+    ("煤炭", ["煤炭", "中国神华", "陕西煤业", "兖矿能源"]),
+    ("电力", ["电力", "长江电力", "华能国际", "三峡能源", "国电电力", "大唐发电"]),
+    ("家电", ["家用电器", "家电", "美的集团", "格力电器", "海尔智家", "海信视像",
+              "老板电器", "苏泊尔", "科沃斯"]),
+    ("通信", ["通信"]),
+    ("软件", ["计算机", "软件开发", "软件", "金山办公", "恒生电子", "广联达",
+              "卫宁健康", "科大讯飞"]),
+    ("传媒", ["传媒", "分众传媒", "芒果超媒", "三七互娱", "完美世界", "恺英网络"]),
+    ("农业", ["农林牧渔", "牧原股份", "温氏股份", "新希望", "养殖", "大北农"]),
+    ("钢铁", ["钢铁", "宝钢股份", "鞍钢股份", "华菱钢铁"]),
+    ("航运港口", ["航运", "港口", "中远海控", "招商轮船", "上港集团", "宁波港"]),
+    ("工程机械", ["工程机械", "三一重工", "中联重科", "徐工机械"]),
+]
+
+_CLASSIFY_LOCK = threading.Lock()
+_CLASSIFY_CACHE = None
+
+
+def load_classify_cache():
+    global _CLASSIFY_CACHE
+    if _CLASSIFY_CACHE is None:
+        try:
+            with open(CLASSIFY_CACHE_FILE, "r", encoding="utf-8") as f:
+                _CLASSIFY_CACHE = json.load(f)
+        except Exception:
+            _CLASSIFY_CACHE = {}
+    return _CLASSIFY_CACHE
+
+
+def save_classify_cache(cache):
+    try:
+        with open(CLASSIFY_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def fetch_emweb_industry(code, market):
+    """东方财富 F10 公司概况: 返回 EM2016 三级行业字符串(如 '医药生物-化学制药-化学原料药')。
+
+    带短时重试(应对冷启动/瞬时网络抖动), 全部失败返回 None(由调用方决定是否重试/缓存)。"""
+    m = (market or _market_prefix(code)).upper()
+    url = f"https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax?code={m}{code}"
+    for _ in range(2):
+        try:
+            r = requests.get(url, timeout=8,
+                             headers={"User-Agent": "Mozilla/5.0",
+                                       "Referer": "https://emweb.eastmoney.com/"})
+            r.encoding = "utf-8"
+            d = r.json()
+            jbzl = d.get("jbzl") or []
+            if jbzl:
+                return (jbzl[0].get("EM2016") or jbzl[0].get("INDUSTRYCSRC1") or "").strip()
+            return None
+        except Exception:
+            import time as _t
+            _t.sleep(1)
+    return None
+
+
+def match_theme(text):
+    if not text:
+        return None
+    for tname, kws in THEME_KEYWORDS:
+        for kw in kws:
+            if kw and kw in text:
+                return tname
+    return None
+
+
+def auto_classify(code, market=None, name="", use_cache=True):
+    """返回该股票归属的细分题材名(命中 THEMES 之一), 否则 None。结果写入缓存。
+
+    use_cache=False 时强制重新拉取(用于后台补类重试); 仅当成功拿到行业时才写缓存,
+    网络失败(industry=None)不缓存, 以便下次重试。"""
+    code = str(code).strip()
+    cache = load_classify_cache()
+    if use_cache and code in cache and cache[code].get("theme") is not None:
+        return cache[code]["theme"]
+    industry = fetch_emweb_industry(code, market)
+    text = f"{industry or ''} {name or ''}"
+    theme = match_theme(text)
+    if industry is not None:
+        with _CLASSIFY_LOCK:
+            cache[code] = {"name": name, "industry": industry, "theme": theme}
+            save_classify_cache(cache)
+    return theme
 
 STATE = {
     "latest": None, "last_update": None, "trading": False,
@@ -428,6 +569,7 @@ def enrich_holding(h, q):
         "at_take": price >= take_price, "at_pressure": price >= pressure,
         "anomalies": [{"level": l, "text": t} for l, t in anomalies],
         "sector_code": h.get("sector_code"), "sector_name": h.get("sector_name"),
+        "theme": h.get("theme", ""),   # 题材自动归类结果(前端新增持仓保存时写入), 供卡片芯片使用
         "buy_date": buy_date,
     }
 
@@ -626,6 +768,8 @@ def _normalize_holdings(raw):
             "cost": float(h.get("cost", 0) or 0),
             "buy_date": str(h.get("buy_date", "")).strip(),
             "name": str(h.get("name", "")).strip(),
+            # 题材自动归类结果(前端新增持仓保存时写入, 启动后台线程补齐存量); 为空则回退 STOCK_THEMES/STOCK_SECTOR
+            "theme": str(h.get("theme", "")).strip(),
             # 板块归属: 优先用 portfolio.json 显式设置, 否则回退到内置 STOCK_SECTOR 表
             "sector_code": str(h.get("sector_code", "")).strip()
                             or _SECTOR_NAME_TO_CODE.get(STOCK_SECTOR.get(str(h.get("code", "")).strip(), ""), ""),
@@ -650,6 +794,72 @@ def reload_holdings():
         cfg = json.load(f)
     with _HOLD_LOCK:
         HOLDINGS = _normalize_holdings(cfg.get("holdings", []))
+
+
+def _backfill_themes():
+    """后台补齐持仓题材归类, 并周期性保活。
+
+    阶段一: 启动后最多 3 轮尝试补齐存量持仓(网络异常重试)。
+    阶段二: 之后每 5 分钟扫描一次, 归类任何"新增但未归类"的持仓——
+             覆盖前端保存时恰逢网络抖动导致未归类的情形, 确保最终自动出芯片。
+    仅处理既无 theme 字段、又不在手工 STOCK_THEMES 表的持仓。"""
+    import time
+    # 阶段一: 启动补齐(重试)
+    for attempt in range(3):
+        try:
+            with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            hs = cfg.get("holdings", [])
+            changed = False
+            pending = False
+            for h in hs:
+                code = str(h.get("code", "")).strip()
+                if not code or h.get("theme") or STOCK_THEMES.get(code):
+                    continue
+                th = auto_classify(code, h.get("market"), h.get("name", ""),
+                                   use_cache=(attempt > 0))
+                if th:
+                    h["theme"] = th
+                    changed = True
+                else:
+                    pending = True
+            if changed:
+                tmp = PORTFOLIO_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, PORTFOLIO_PATH)
+                reload_holdings()
+            if not pending:
+                break
+            time.sleep(60)
+        except Exception as e:
+            print("[backfill] 题材补齐异常:", e)
+            time.sleep(30)
+    # 阶段二: 周期性保活(应对 POST 时网络抖动未归类的持仓)
+    while True:
+        time.sleep(300)
+        try:
+            with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            hs = cfg.get("holdings", [])
+            changed = False
+            for h in hs:
+                code = str(h.get("code", "")).strip()
+                if not code or h.get("theme") or STOCK_THEMES.get(code):
+                    continue
+                th = auto_classify(code, h.get("market"), h.get("name", ""),
+                                   use_cache=False)
+                if th:
+                    h["theme"] = th
+                    changed = True
+            if changed:
+                tmp = PORTFOLIO_PATH + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, PORTFOLIO_PATH)
+                reload_holdings()
+        except Exception as e:
+            print("[backfill] 周期扫描异常:", e)
 
 
 def _seed_gapup_baseline():
@@ -1339,13 +1549,13 @@ def build_snapshot():
     for h in holdings:
         if h.get("error"):
             continue
-        tlist = STOCK_THEMES.get(h["code"])
+        tlist = h.get("theme") or STOCK_THEMES.get(h["code"])
         if not tlist:
             broad = STOCK_SECTOR.get(h["code"])
             tlist = [broad] if broad else None
         if not tlist:
             continue
-        tname = tlist[0]
+        tname = tlist[0] if isinstance(tlist, (list, tuple)) else tlist
         tc = "TH:" + tname
         tt = _theme_by_code.get(tc)
         if tt is not None:
@@ -2478,6 +2688,23 @@ def api_portfolio():
             if code not in existing:
                 item.setdefault("buy_date", beijing_now().strftime("%Y-%m-%d"))
             new_holdings.append(item)
+        # 题材自动归类: 对缺失题材且不在手工 STOCK_THEMES 表的持仓(含新增),
+        # 通过东方财富行业 + 名称自动识别, 写回 theme 字段(前端新增即自动显示芯片)。
+        # 归类仅在保存时触发, 失败不影响保存; 分类网络异常时交由启动后台线程重试。
+        try:
+            need = [h for h in new_holdings
+                    if not (h.get("theme") or STOCK_THEMES.get(h["code"]))]
+            if need:
+                codes = [h["code"] for h in need]
+                qn = fetch_tencent([(_market_prefix(c) + c) for c in codes])
+                for h in need:
+                    up = (_market_prefix(h["code"]) + h["code"]).upper()
+                    nm = h.get("name") or parse_row(qn.get(up, [])).get("name", "")
+                    if nm:
+                        h["name"] = nm
+                    h["theme"] = auto_classify(h["code"], h.get("market"), nm)
+        except Exception:
+            pass
         if not new_holdings:
             return jsonify({"ok": False, "error": "至少保留一只持仓(股票代码不能为空)"}), 400
         # 仅替换 holdings, 保留其余顶层字段(closed_positions/settings/watchlist 等)
@@ -3032,5 +3259,6 @@ load();setInterval(load,5000);
 if __name__ == "__main__":
     _ensure_runtime_data()   # 兜底: 缺失的运行时数据文件用模板/基线初始化
     threading.Thread(target=scheduler_loop, daemon=True).start()
+    threading.Thread(target=_backfill_themes, daemon=True).start()  # 后台补齐存量持仓题材
     print(f"监控平台 v2 启动: http://localhost:{PORT}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)
