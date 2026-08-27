@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.9.3"
+VERSION = "v3.9.4"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -491,17 +491,22 @@ def enrich_holding(h, q):
     value = price * shares
     pnl = (price - cost) * shares
     pnl_pct = (price - cost) / cost * 100 if cost else 0
-    # 当日盈亏: 隔夜持仓基于昨收; 当日新买入持仓基于买入成本
-    #   区分原因: 今日才买入的持仓, 昨日收盘时并未持有, 用昨收算当日盈亏无意义,
-    #   应以其实际买入成本(=cost)为基准。buy_date 为空或早于今日时按隔夜持仓处理(沿用昨收)。
-    _bd = None
-    if h.get("buy_date"):
+    # 当日盈亏口径: 以"最后买入日(last_buy_date)"为判定依据
+    #   - 今天有买入动作(首买 / 加仓 / 改仓, last_buy_date==今天): 基于买入成本(=cost)
+    #     因为今天才发生买入, 昨日收盘时并未持有(或持仓结构已变), 用昨收算当日盈亏无意义
+    #   - 之前买入且之后未动(last_buy_date 为历史日期): 基于上一交易日收盘价(=昨收)
+    #   浮动盈亏(pnl)始终基于成本价, 与当日盈亏口径无关。
+    #   last_buy_date 为空时默认视为"今天买入"(前端每次保存都会写入今天, 故新增/加仓必为今天)。
+    _lbd = None
+    if h.get("last_buy_date") or h.get("buy_date"):
+        _raw = h.get("last_buy_date") or h.get("buy_date")
         try:
-            _bd = datetime.datetime.strptime(h["buy_date"], "%Y-%m-%d").date()
+            _lbd = datetime.datetime.strptime(_raw, "%Y-%m-%d").date()
         except Exception:
-            _bd = None
-    if _bd is not None and _bd == beijing_now().date():
-        prev = cost  # 今日新买入: 以买入成本为基准
+            _lbd = None
+    is_today_buy = (_lbd is None) or (_lbd == beijing_now().date())
+    if is_today_buy:
+        prev = cost  # 当日新买入/加仓: 以买入成本为基准
     else:
         prev = d["prevclose"] if d["prevclose"] > 0 else cost
     day_pnl = (price - prev) * shares
@@ -557,7 +562,8 @@ def enrich_holding(h, q):
         "cost": cost, "shares": shares,
         "value": round(value, 2), "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 2),
         "day_pnl": round(day_pnl, 2), "day_pnl_pct": round(day_pnl_pct, 2),
-        "day_basis": "成本" if (_bd is not None and _bd == beijing_now().date()) else "昨收",
+        "day_basis": "成本" if is_today_buy else "昨收",  # is_today_buy 已在上文定义
+
         "limit_up": round(d["limit_up"], 2), "limit_down": round(d["limit_down"], 2),
         "turnover": round(d["turnover"], 2), "amplitude": round(d["amplitude"], 2),
         "volratio": round(d["volratio"], 2) if 0 < d["volratio"] <= 10 else None,
@@ -767,6 +773,7 @@ def _normalize_holdings(raw):
             "shares": float(h.get("shares", 0) or 0),
             "cost": float(h.get("cost", 0) or 0),
             "buy_date": str(h.get("buy_date", "")).strip(),
+            "last_buy_date": str(h.get("last_buy_date", "")).strip(),
             "name": str(h.get("name", "")).strip(),
             # 题材自动归类结果(前端新增持仓保存时写入, 启动后台线程补齐存量); 为空则回退 STOCK_THEMES/STOCK_SECTOR
             "theme": str(h.get("theme", "")).strip(),
@@ -2678,15 +2685,17 @@ def api_portfolio():
             shares = float(h.get("shares", 0) or 0)
             if cost < 0 or shares < 0:
                 return jsonify({"ok": False, "error": f"股票 {code} 的成本/股数不能为负"}), 400
-            # 仅覆盖可编辑的三个字段, 其余原有字段(含 buy_date)原样保留
+            # 仅覆盖可编辑的三个字段, 其余原有字段原样保留
             item = dict(existing.get(code, {}))
             item["code"] = code
             item["cost"] = round(cost, 3)
             item["shares"] = round(shares, 2)
-            # 前端新增的持仓: 默认买入日期为今天, 使"当日盈亏"基于成本(非昨收)。
-            # 已有持仓(在 existing 中)保留其原 buy_date, 维持隔夜口径, 不回退为今天。
-            if code not in existing:
-                item.setdefault("buy_date", beijing_now().strftime("%Y-%m-%d"))
+            # 每次保存(新增 / 改成本 / 加仓)都代表"今天有买入动作",
+            # 故把最后买入日(last_buy_date)写为今天, 使当日盈亏基于成本(而非昨收)。
+            # 首次买入时若没有 buy_date 也补记为今天(首买日)。
+            today_str = beijing_now().strftime("%Y-%m-%d")
+            item.setdefault("buy_date", today_str)
+            item["last_buy_date"] = today_str
             new_holdings.append(item)
         # 题材自动归类: 对缺失题材且不在手工 STOCK_THEMES 表的持仓(含新增),
         # 通过东方财富行业 + 名称自动识别, 写回 theme 字段(前端新增即自动显示芯片)。
@@ -2864,7 +2873,7 @@ td:first-child,th:first-child{text-align:left}
   </div>
   <div class="grid" id="holdings"></div>
   <div class="card" id="pfEditor" style="display:none">
-    <h3>✏️ 编辑持仓 <span class="note" style="font-weight:400">仅可改 股票代码 / 成本 / 股数，其余字段由系统按行情自动计算（无需持有时间 / 购买时间）</span></h3>
+    <h3>✏️ 编辑持仓 <span class="note" style="font-weight:400">仅可改 股票代码 / 成本 / 股数；每次保存视为"今日有买入动作"，当日盈亏即按成本计算（之前买入且未改动的按昨收）</span></h3>
     <div id="pfRows"></div>
     <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
       <button onclick="pfAdd()" style="background:var(--card);color:var(--txt);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px">➕ 新增一行</button>
