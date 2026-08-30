@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.0"
+VERSION = "v3.11.1"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -2336,6 +2336,11 @@ _TUNE_SPEC = {
     "preopen_limitup": {"kind": "scfg", "wkeys": list(_SCFG_W_DEFAULT.keys()),
                "feats": ["dist_limit_up", "vr", "pct", "wb", "fmv", "yao", "yao_days", "resonance"],
                "def_thr": 50, "pos": "limitup"},
+    # v3.11.1: 尾盘高开潜力(gapup) 接入自动权重调参。评分=排名问题(以 AUC 衡量判别力),
+    # 无二元决策阈值; 调权沿用 optimize_gapup_weights(坐标上升 + AUC目标 + L2正则 + 校准惩罚), 落盘 GAPUP_TUNED。
+    "gapup": {"kind": "gapup", "wkeys": ["gu_pos_w", "gu_parab_w", "gu_wb_w", "gu_vr_w", "gu_to_w",
+              "gu_latepull_w", "gu_breadth_w", "gu_retail_w", "gu_idxlate_w", "gu_parab_peak", "gu_sig"],
+              "pos": "gapup", "def_thr": None, "feats": None},
 }
 
 
@@ -2528,11 +2533,41 @@ def _tune_weights(module, samples, spec):
             round(f1_at(W0, test), 4), round(sum(abs(w[k] - w_now[k]) for k in w) / len(w), 4), diff)
 
 
+def _tune_gapup():
+    """v3.11.1: 包装 optimize_gapup_weights, 把结果映射进统一自动调参结构 _PRED_TUNE['gapup']。
+    gapup 是排名问题(下个交易日高开概率), 以 AUC 衡量判别力, 无二元决策阈值。
+    复用既有 optimize_gapup_weights(坐标上升 + AUC目标 + L2正则 + 校准惩罚), 落盘 GAPUP_TUNED。"""
+    res = optimize_gapup_weights()
+    out = {"module": "gapup",
+           "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S"),
+           "threshold": {"status": "排名推荐(无二元阈值)"}}
+    if res.get("ok"):
+        before, after = res.get("before") or {}, res.get("after") or {}
+        diff = {k: round(after.get(k, before.get(k, 0)) - before.get(k, 0), 4)
+                for k in after if abs(after.get(k, 0) - before.get(k, 0)) > 1e-6}
+        out["weights"] = {"n": res.get("samples"),
+                          "auc_before": res.get("auc_before"), "auc_after": res.get("auc_after"),
+                          "drift": round(sum(abs(after.get(k, 0) - before.get(k, 0)) for k in after)
+                                         / max(1, len(after)), 4),
+                          "values": diff}
+    else:
+        out["weights"] = {"n": res.get("samples", 0), "status": "待激活",
+                          "need": GAPUP_MIN_OPT_SAMPLES}
+    return out
+
+
 def auto_tune_module(module):
     """对单模块做阈值+权重自调, 落盘并立即应用。样本不足则返回'待激活'。"""
     if module not in _TUNE_SPEC:
         return {"ok": False, "reason": "未纳入自动调参"}
     spec = _TUNE_SPEC[module]
+    # v3.11.1: gapup 是排名问题(高开概率), 用 AUC 衡量判别力、无阈值, 走专用调权分支
+    if spec.get("kind") == "gapup":
+        res = _tune_gapup()
+        _PRED_TUNE[module] = res
+        _save_pred_tune()
+        _apply_pred_tune_one(module)   # 重载 GAPUP_TUNED 到实时覆盖权重, 立即可见
+        return res
     res = {"module": module, "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")}
     # —— 阈值自调 ——
     ts = _collect_thr_samples(module)
@@ -2601,6 +2636,18 @@ def _apply_pred_tune_one(module):
     if not res:
         return
     spec = _TUNE_SPEC[module]
+    # v3.11.1: gapup 调权结果落在 GAPUP_TUNED, 通过实时覆盖权重 GAPUP_WEIGHT_OVERRIDE 生效(无需重启)
+    if spec.get("kind") == "gapup":
+        global GAPUP_WEIGHT_OVERRIDE
+        if os.path.exists(GAPUP_TUNED):
+            try:
+                GAPUP_WEIGHT_OVERRIDE = {k: float(v)
+                                         for k, v in json.load(open(GAPUP_TUNED, encoding="utf-8")).items()}
+            except Exception:
+                GAPUP_WEIGHT_OVERRIDE = None
+        else:
+            GAPUP_WEIGHT_OVERRIDE = None
+        return
     thr = (res.get("threshold") or {}).get("threshold")
     if isinstance(thr, (int, float)):
         _MODULE_THRESHOLDS[module] = int(round(thr))
@@ -3078,8 +3125,11 @@ def _verify_gapup_open(target_date=None):
         stats = _accumulate_stats(rec)
         ng = sum(1 for a in actual if a.get("is_gap_up"))
         print(f"[gapup-verify] {rec.get('date')} 验证完成: 高开 {ng}/{len(actual)}", flush=True)
-        if stats.get("total", 0) >= GAPUP_MIN_OPT_SAMPLES:
-            optimize_gapup_weights()
+        # v3.11.1: 接入统一自动调参引擎(权重自调, AUC目标); 样本不足则记录待激活
+        try:
+            auto_tune_module("gapup")
+        except Exception:
+            traceback.print_exc()
         # v3.10: 每验证一条就重拟合概率校准, 让概率随样本积累自动收敛到真实水平
         try:
             cb = fit_gapup_calib()
@@ -3554,7 +3604,8 @@ def verify_predictions():
                 except Exception:
                     traceback.print_exc()
             # v3.11.0: 每次回填后自动调参(阈值+权重), 达到样本阈值才生效, 否则显示待激活
-            for m in _TUNE_SPEC:
+            # 注: 仅对4个 P1 模块; gapup 在 verify_gapup_predictions 中单独触发(避免重复调参)
+            for m in PRED_MODULES:
                 try:
                     rt = auto_tune_module(m)
                     thr = rt.get("threshold", {})
@@ -4003,7 +4054,22 @@ def api_pred_stats():
     s = _recompute_pred_stats() if request.args.get("refresh") in ("1", "true") else load_pred_stats()
     # v3.11.0: 附加各模块自动调参状态(阈值/权重), 供面板展示
     s["tune"] = {m: _PRED_TUNE.get(m) for m in _TUNE_SPEC}
-    s["tune_meta"] = {"min_thr": MIN_TUNE_THRESH, "min_w": MIN_TUNE_WEIGHT}
+    s["tune_meta"] = {"min_thr": MIN_TUNE_THRESH, "min_w": MIN_TUNE_WEIGHT,
+                      "gapup_min": GAPUP_MIN_OPT_SAMPLES}
+    # v3.11.1: 把尾盘高开潜力(gapup) 的命中率/校准状态桥接进统一面板, 作为第5个模块行
+    st = _load_stats()
+    gcal = _GAPUP_CALIB
+    ghr = st.get("hit_rate")
+    gap_avg_pred = st.get("avg_pred")
+    s["modules"]["gapup"] = {
+        "label": "尾盘高开潜力", "n": st.get("total", 0),
+        "hit_rate": ghr, "avg_pred": gap_avg_pred,
+        "bias_pp": (gap_avg_pred - ghr * 100)
+                   if (ghr is not None and gap_avg_pred is not None) else None,
+        "calib": ({"n": gcal.get("n", 0), "applied": gcal.get("n", 0) >= GAPUP_MIN_CALIB_SAMPLES}
+                  if gcal.get("A") is not None else {"n": 0, "applied": False}),
+        "by_verdict": {}, "recent": [],
+    }
     return jsonify(s)
 
 
@@ -4040,6 +4106,14 @@ def api_tune_reset():
             SCFG[k] = _SCFG_W_DEFAULT[k]
     for m in _TUNE_SPEC:
         _MODULE_THRESHOLDS[m] = _TUNE_SPEC[m]["def_thr"]
+    # v3.11.1: gapup 权重覆盖(由 optimize_gapup_weights 落盘 GAPUP_TUNED)一并恢复默认
+    global GAPUP_WEIGHT_OVERRIDE
+    GAPUP_WEIGHT_OVERRIDE = None
+    try:
+        if os.path.exists(GAPUP_TUNED):
+            os.remove(GAPUP_TUNED)
+    except Exception:
+        pass
     try:
         _recompute_pred_stats()
     except Exception:
@@ -4299,6 +4373,9 @@ td:first-child,th:first-child{text-align:left}
 .gv-toolbar .gv-btn{background:var(--blue,#2f80ed);color:#06121f;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}
 .gv-toolbar .gv-btn:hover{opacity:.88}
 .eye:hover{border-color:var(--blue)}
+/* v3.11.1: 高开回测 / 预测回测总览 并排; 窄屏自动堆叠为单列 */
+.gv-twocol{} /* 容器样式内联(两列 grid), 此处仅占位 */
+@media(max-width:900px){.gv-twocol{grid-template-columns:1fr !important}}
 .masked{color:var(--mut);letter-spacing:2px}
 .minichart{width:100%;height:130px;margin-top:10px;border-radius:8px;background:var(--chart-bg)}
 </style></head>
@@ -4387,16 +4464,23 @@ td:first-child,th:first-child{text-align:left}
     <span id="gapupTip" class="code">点击立即全市场扫描主板，约需 1~3 分钟</span>
   </div>
   <div class="card" id="gapup"><div class="note">尚未生成（交易日 14:52 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
+  <!-- 7. 回测面板(v3.11.1): 高开回测 与 预测回测总览 并排 -->
+  <div class="gv-twocol" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
+    <div class="gv-col">
   <!-- 7.1 高开回测(v3.4) -->
   <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
     <span>📊 高开回测（推荐→开盘实测）</span>
   </div>
   <div class="card gv-card" id="gapverify"><div class="note">加载中…</div></div>
-  <!-- 7.2 预测回测总览(v3.10): 上证1小时/尾盘大盘/尾盘个股/盘前涨停 的命中率与校准偏差 -->
+    </div>
+    <div class="gv-col">
+  <!-- 7.2 预测回测总览(v3.10): 上证1小时/尾盘大盘/尾盘个股/盘前涨停/尾盘高开潜力 的命中率与校准偏差 -->
   <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
     <span>🎯 预测回测总览（各模块命中率 & 概率校准）</span>
   </div>
   <div class="card gv-card" id="predstats"><div class="note">加载中…</div></div>
+    </div>
+  </div>
   <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
   <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">__VERSION__</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
 </div>
@@ -4666,7 +4750,7 @@ function renderGapVerify(d){
 }
 
 // 预测回测总览(v3.10): 四个预测模块的命中率/平均预测概率/校准偏差 + 日线库状态
-const PRED_LABELS={idx_1h:'上证1小时方向',close_market:'尾盘大盘次日',close_stock:'尾盘个股次日',preopen_limitup:'盘前涨停预测'};
+const PRED_LABELS={idx_1h:'上证1小时方向',close_market:'尾盘大盘次日',close_stock:'尾盘个股次日',preopen_limitup:'盘前涨停预测',gapup:'尾盘高开潜力'};
 const PRED_MIN_CALIB=12;   // 概率校准自动启用的样本阈值(与后端 PRED_MIN_CALIB_SAMPLES 同步)
 function renderPredStats(s){
   const box=document.getElementById('predstats');
@@ -4708,7 +4792,15 @@ function renderPredStats(s){
     const tn=tune[k]||{};
     const thr=tn.threshold||{}; const wt=tn.weights||{};
     let tuneBadge;
-    if(thr.threshold!=null){
+    if(k==='gapup'){   // v3.11.1: gapup 是排名问题, 以 AUC 衡量判别力, 无二元阈值
+      if(wt.auc_after!=null){
+        const up=wt.auc_after>=wt.auc_before;
+        tuneBadge='<span class="gv-prob" style="color:var(--green,#2ecc71)">✓已调参 AUC '
+          +fmt(wt.auc_before,3)+'→'+fmt(wt.auc_after,3)+(up?' ▲':' ▼')+' (n='+wt.n+')</span>';
+      } else {
+        tuneBadge='<span class="gv-prob flat">待激活('+(wt.n||0)+'/'+(wt.need||(tmeta.gapup_min||10))+')</span>';
+      }
+    } else if(thr.threshold!=null){
       tuneBadge='<span class="gv-prob" style="color:var(--green,#2ecc71)">✓已调参 阈值'+thr.threshold
         +' F1 '+thr.def_f1+'→'+thr.f1;
       if(wt.values&&Object.keys(wt.values).length) tuneBadge+=' 权重漂移'+wt.drift;
