@@ -8,7 +8,7 @@
 - 异动提醒置顶
 数据底座: 腾讯财经实时行情 qt.gtimg.cn (真实数据)
 """
-import json, re, math, time, threading, datetime, os, random, traceback, shutil
+import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
 from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, Response, jsonify, request
 
@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.10.0"
+VERSION = "v3.10.1"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -51,6 +51,10 @@ DAILY_UNIVERSE_LIMIT = 0      # 0=全市场; >0 则只存前N只(按代码序), 
 # v3.10: 通用预测回测闭环(上证1小时/尾盘大盘/尾盘个股/开盘前涨停)
 PRED_LOG = f"{BASE}/pred_log.jsonl"
 PRED_STATS = f"{BASE}/pred_stats.json"
+# v3.10.1: 预测概率自动校准(Platt scaling, 与 gapup 同款): 4 个 P1 模块(上证1小时/尾盘大盘/尾盘个股/盘前涨停)
+# 的概率输出随验证样本积累自动收敛到真实命中率。校准参数按模块分别持久化, 避免互相干扰。
+PRED_CALIB = f"{BASE}/pred_calib.json"
+PRED_MIN_CALIB_SAMPLES = 12
 
 with open(f"{BASE}/portfolio.json", "r", encoding="utf-8") as f:
     CFG = json.load(f)
@@ -1033,6 +1037,7 @@ def _ensure_runtime_data():
         _seed_gapup_baseline()
     # 2.5) 加载概率校准参数(Platt scaling), 保证重启后推荐概率延续上次校准结果
     _load_gapup_calib()
+    _load_pred_calib()
     # 3) 加载调优后的权重(若存在)覆盖默认 gu_*(部分字典即可, gap_up_score 会合并到 FCONFIG)
     global GAPUP_WEIGHT_OVERRIDE
     if os.path.exists(GAPUP_TUNED):
@@ -1043,6 +1048,11 @@ def _ensure_runtime_data():
                 print(f"[init] 已加载调优权重: {len(tw)} 项", flush=True)
         except Exception:
             pass
+    # 2.6) 启动即按当前 pred_log + 已加载的校准参数重算回测统计, 避免重启后面板读到旧缓存文件
+    try:
+        _recompute_pred_stats()
+    except Exception:
+        pass
 
 
 
@@ -2050,6 +2060,8 @@ class AIClient:
 # 方案: 用已验证样本 (score, 是否真高开) 拟合 Platt scaling: P = 1/(1+exp(A*score+B)),
 # 让输出概率名副其实。样本不足时自动降级不启用, 避免小样本过拟合。
 _GAPUP_CALIB = {"A": None, "B": None, "n": 0, "fitted_at": None}
+# v3.10.1: 各 P1 模块的概率校准参数(按模块独立), 形如 {"idx_1h": {"A":1.0,"B":..,"n":..}, ...}
+_PRED_CALIB = {}
 
 def _load_gapup_calib():
     """启动时加载已拟合的校准参数(A/B)。"""
@@ -2152,6 +2164,112 @@ def fit_gapup_calib():
     return {"ok": True, "A": round(A, 6), "B": round(B, 6), "n": n,
             "pred_mean": round(_mean_pred(B) * 100, 2),
             "actual_rate": round(actual_rate, 4),
+            "note": f"固定A={A:.3f}, 二分法求B={B:.3f}, 使预测均值≈实际发生率"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v3.10.1: 通用预测概率校准(覆盖 4 个 P1 模块)
+# 与 gapup 校准同一套哲学: 固定 A=1(纯 logit 平移), 只用二分法求 B, 使"平均预测概率"
+# = "实际命中率"。固定 A 不改变排序(不损失 AUC), 只把概率整体搬到真实水平, 小样本稳健。
+# 输入是各模块已输出的 prob(0~100), 经 logit 变换后在 logit 空间做平移校准。
+# 关键: 拟合用的是 pred_log 中**原始未校准**的 prob(落盘时不套校准), 因此校准→验证→再拟合
+# 不会形成反馈漂移(验证回填读的是原始 prob)。
+# ─────────────────────────────────────────────────────────────────────────────
+def _load_pred_calib():
+    """启动时加载各模块的预测概率校准参数(A/B)。"""
+    global _PRED_CALIB
+    try:
+        if os.path.exists(PRED_CALIB):
+            with open(PRED_CALIB, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    if isinstance(v, dict) and v.get("A") is not None and v.get("B") is not None:
+                        _PRED_CALIB[k] = v
+                if _PRED_CALIB:
+                    _summary = ", ".join("{}(n={})".format(k, v.get("n")) for k, v in _PRED_CALIB.items())
+                    print(f"[init] 已加载预测校准: {_summary}", flush=True)
+    except Exception:
+        pass
+
+
+def _apply_pred_calib(module, prob):
+    """把模块的预测概率按 Platt scaling 校准; 未拟合/样本不足时原样返回。"""
+    c = _PRED_CALIB.get(module)
+    if not c or c.get("n", 0) < PRED_MIN_CALIB_SAMPLES:
+        return prob
+    try:
+        p = max(1e-6, min(0.999999, float(prob) / 100.0))
+        lo = math.log(p / (1.0 - p))            # logit 变换
+        A, B = c["A"], c["B"]
+        z = max(-60.0, min(60.0, A * lo + B))
+        return 1.0 / (1.0 + math.exp(-z)) * 100
+    except Exception:
+        return prob
+
+
+def _logit_mean_pred(samples, B, A=1.0):
+    """samples: [(prob, _), ...]; 返回经 (A*logit+B) 校准后的平均概率。"""
+    tot = 0.0
+    for pr, _ in samples:
+        p = max(1e-6, min(0.999999, float(pr) / 100.0))
+        lo = math.log(p / (1.0 - p))
+        z = max(-60.0, min(60.0, A * lo + B))
+        tot += 1.0 / (1.0 + math.exp(-z))
+    return tot / len(samples) if samples else 0.0
+
+
+def fit_pred_calib(module):
+    """对某模块拟合概率校准: 固定 A=1, 二分 B 使平均校准概率 = 实际命中率。"""
+    global _PRED_CALIB
+    if module not in PRED_MODULES:
+        return {"ok": False, "reason": "未知模块", "module": module}
+    samples = []   # (prob, y)
+    for rec in _load_pred_log():
+        if rec.get("module") != module or not rec.get("verified"):
+            continue
+        act = rec.get("actual") or {}
+        hit = act.get("hit")
+        if hit is None:
+            continue                              # 过期/无实际结果, 跳过
+        pr = (rec.get("pred") or {}).get("prob")
+        if not isinstance(pr, (int, float)) or not (0 < pr < 100):
+            continue
+        samples.append((float(pr), 1.0 if hit else 0.0))
+    n = len(samples)
+    if n < PRED_MIN_CALIB_SAMPLES:
+        return {"ok": False, "reason": f"样本不足({n}/{PRED_MIN_CALIB_SAMPLES}), 暂不校准",
+                "module": module, "n": n}
+    actual_rate = sum(y for _, y in samples) / n
+    if actual_rate <= 0.0 or actual_rate >= 1.0:
+        return {"ok": False, "reason": f"样本单一(发生率{actual_rate:.2f}), 无法校准",
+                "module": module, "n": n}
+    A = 1.0
+    lo, hi = -30.0, 30.0
+    if _logit_mean_pred(samples, lo, A) > actual_rate:
+        B = lo
+    elif _logit_mean_pred(samples, hi, A) < actual_rate:
+        B = hi
+    else:
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if _logit_mean_pred(samples, mid, A) < actual_rate:
+                lo = mid
+            else:
+                hi = mid
+        B = (lo + hi) / 2.0
+    _PRED_CALIB[module] = {"A": round(A, 6), "B": round(B, 6), "n": n,
+                           "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")}
+    try:
+        tmp = PRED_CALIB + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_PRED_CALIB, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PRED_CALIB)
+    except Exception as e:
+        print("[pred-calib] 写入失败:", e, flush=True)
+    return {"ok": True, "module": module, "A": round(A, 6), "B": round(B, 6), "n": n,
+            "pred_mean": round(_logit_mean_pred(samples, B, A) * 100, 2),
+            "actual_rate": round(actual_rate * 100, 2),
             "note": f"固定A={A:.3f}, 二分法求B={B:.3f}, 使预测均值≈实际发生率"}
 
 
@@ -3075,6 +3193,15 @@ def verify_predictions():
             _recompute_pred_stats()
         if done:
             print(f"[pred-verify] 回填 {done} 条预测结果", flush=True)
+            # v3.10.1: 每次回填后, 对各模块重拟合概率校准(达到样本阈值才生效, 否则原样通过)
+            for m in PRED_MODULES:
+                try:
+                    cb = fit_pred_calib(m)
+                    if cb.get("ok"):
+                        print(f"[pred-calib] {m} A={cb['A']} B={cb['B']} n={cb['n']} "
+                              f"预测均值={cb['pred_mean']}% 实际={cb['actual_rate']}%", flush=True)
+                except Exception:
+                    traceback.print_exc()
         return done
     except Exception:
         traceback.print_exc()
@@ -3095,10 +3222,16 @@ def _recompute_pred_stats():
         n = len(rows)
         ent = {"label": PRED_MODULES[m]["label"], "n": n, "hit": 0,
                "hit_rate": None, "avg_pred": None, "avg_ret": None,
-               "bias_pp": None, "by_verdict": {}, "recent": []}
+               "bias_pp": None, "by_verdict": {}, "recent": [], "calib": None}
         if n:
             hits = sum(1 for r in rows if r["actual"].get("hit"))
-            preds = [r["pred"].get("prob") for r in rows
+            # v3.10.1: 概率校准状态(展示用); 平均预测概率本身已按校准参数对齐
+            c = _PRED_CALIB.get(m)
+            ent["calib"] = ({"n": c["n"], "B": round(c["B"], 3),
+                             "applied": c.get("n", 0) >= PRED_MIN_CALIB_SAMPLES}
+                            if c else {"n": 0, "applied": False})
+            # v3.10.1: 平均预测概率按已拟合校准参数对齐, 让面板显示真实水平(校准前为原始虚高值)
+            preds = [_apply_pred_calib(m, r["pred"].get("prob")) for r in rows
                      if isinstance(r["pred"].get("prob"), (int, float))]
             rets = [r["actual"].get("ret") for r in rows
                     if isinstance(r["actual"].get("ret"), (int, float))]
@@ -3123,7 +3256,7 @@ def _recompute_pred_stats():
             rows_sorted = sorted(rows, key=lambda x: x.get("verified_at", ""), reverse=True)
             ent["recent"] = [{"date": r.get("date"), "key": r.get("key"),
                               "verdict": r["pred"].get("verdict"),
-                              "prob": r["pred"].get("prob"),
+                              "prob": round(_apply_pred_calib(m, r["pred"].get("prob")), 1),
                               "ret": r["actual"].get("ret"),
                               "hit": r["actual"].get("hit")} for r in rows_sorted[:12]]
         stats["modules"][m] = ent
@@ -3144,6 +3277,40 @@ def load_pred_stats():
         except Exception:
             pass
     return _recompute_pred_stats()
+
+
+# ---------------- v3.10.1: 实时输出的概率校准(展示层, 不污染 STATE/落盘) ----------------
+def _calib_idx_view(payload):
+    """上证1小时预测的实时概率校准(复制后改, 不动 STATE)。"""
+    if not isinstance(payload, dict) or "prob" not in payload:
+        return payload
+    p = dict(payload)
+    p["prob"] = round(_apply_pred_calib("idx_1h", p.get("prob", 0)), 1)
+    return p
+
+
+def _calib_close_view(payload):
+    """尾盘预测(大盘+个股)的实时概率校准(复制后改, 不动 STATE)。"""
+    if not isinstance(payload, dict):
+        return payload
+    p = copy.deepcopy(payload)
+    if isinstance(p.get("market"), dict):
+        p["market"]["prob"] = round(_apply_pred_calib("close_market", p["market"].get("prob", 0)), 1)
+    for s in (p.get("stocks") or []):
+        if isinstance(s, dict):
+            s["prob"] = round(_apply_pred_calib("close_stock", s.get("prob", 0)), 1)
+    return p
+
+
+def _calib_preopen_view(payload):
+    """盘前涨停预测的实时概率校准(复制后改, 不动 STATE)。"""
+    if not isinstance(payload, dict):
+        return payload
+    p = copy.deepcopy(payload)
+    for c in (p.get("rows") or []):
+        if isinstance(c, dict):
+            c["prob"] = round(_apply_pred_calib("preopen_limitup", c.get("prob", 0)), 1)
+    return p
 
 
 # ---------------- v3.10: 本地日线库 (P2) ----------------
@@ -3421,9 +3588,9 @@ def api_snapshot():
                 return jsonify({"error": "build_snapshot timeout", "beijing": beijing_now().strftime("%Y-%m-%d %H:%M:%S")})
         data = dict(STATE["latest"])
         # 动态合并最新状态(涨停趋势/指数预测/预警), 前端5秒轮询即可看到
-        data["preopen"] = STATE["preopen"]
-        data["idx_forecast"] = STATE["idx_forecast"]
-        data["close"] = STATE["close"]
+        data["preopen"] = _calib_preopen_view(STATE["preopen"])
+        data["idx_forecast"] = _calib_idx_view(STATE["idx_forecast"])
+        data["close"] = _calib_close_view(STATE["close"])
         data["sector_drivers"] = STATE["sector_drivers"]
         data["gapup"] = STATE["gapup"]
     data["server_time"] = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3434,7 +3601,7 @@ def api_snapshot():
 def api_preopen():
     with LOCK:
         if STATE["preopen"]:
-            return jsonify(STATE["preopen"])
+            return jsonify(_calib_preopen_view(STATE["preopen"]))
     # 无缓存: 异步触发构建并返回构建中状态
     r = scan_limit_up()
     if r.get("building"):
@@ -3451,7 +3618,7 @@ def api_close():
     _start_close_build()
     with LOCK:
         cur = STATE["close"]
-    return jsonify(cur if cur else {"building": True,
+    return jsonify(_calib_close_view(cur) if cur else {"building": True,
                                     "note": "尾盘预测计算中(含AI模型融合), 请稍候自动更新…"})
 
 
@@ -3461,7 +3628,7 @@ def api_idx():
     _start_idx_build()
     with LOCK:
         cur = STATE["idx_forecast"]
-    return jsonify(cur if cur else {"building": True,
+    return jsonify(_calib_idx_view(cur) if cur else {"building": True,
                                     "note": "上证预测计算中(含AI模型融合), 请稍候自动更新…"})
 
 
@@ -4097,6 +4264,7 @@ function renderGapVerify(d){
 
 // 预测回测总览(v3.10): 四个预测模块的命中率/平均预测概率/校准偏差 + 日线库状态
 const PRED_LABELS={idx_1h:'上证1小时方向',close_market:'尾盘大盘次日',close_stock:'尾盘个股次日',preopen_limitup:'盘前涨停预测'};
+const PRED_MIN_CALIB=12;   // 概率校准自动启用的样本阈值(与后端 PRED_MIN_CALIB_SAMPLES 同步)
 function renderPredStats(s){
   const box=document.getElementById('predstats');
   if(!box) return;
@@ -4119,6 +4287,12 @@ function renderPredStats(s){
       +`<span class="gv-gap ${rate==null?'flat':(rate>=50?'up':'down')}">命中率 ${rate==null?'--':fmt(rate,0)+'%'}</span>`
       +`<span class="gv-res ${biasCls}" style="min-width:96px;text-align:right;font-size:12px">偏差 ${biasTxt}</span>`
       +`</div>`;
+    // v3.10.1: 概率自动校准徽章(样本≥12 自动拟合, 实时输出与面板概率同步对齐真实命中率)
+    const cb=e.calib||{};
+    const calibBadge = cb.applied
+      ? `<span class="gv-prob" style="color:var(--green,#2ecc71)">✓已校准(n=${cb.n})</span>`
+      : `<span class="gv-prob flat">未校准(${cb.n||0}/${PRED_MIN_CALIB||12})</span>`;
+    r+=`<div class="gv-opt-row" style="padding-left:10px">${calibBadge}</div>`;
     // 分方向明细(紧凑一行)
     const bv=e.by_verdict||{};
     const detail=Object.keys(bv).map(v=>{
