@@ -26,6 +26,7 @@ gapup_weights_tuned.json
 # v3.10: 概率校准参数 / 通用预测回测日志与统计 / 本地日线库(运行时累积, 均属用户数据)
 gapup_calib.json
 pred_calib.json
+pred_tune.json
 pred_log.jsonl
 pred_stats.json
 daily_bars.jsonl

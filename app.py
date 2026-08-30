@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.10.1"
+VERSION = "v3.11.0"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -736,8 +736,9 @@ def index_forecast(snap=None):
     score += (breadth - 0.5) * FCONFIG["idx_breadth_w"]           # ⑥宽度 (上涨板块占比)
     score += retail * FCONFIG["idx_retail_w"]                     # ⑦国证2000小盘情绪
     prob = 1 / (1 + math.exp(-score / FCONFIG["idx_sig"])) * 100
-    # 三段式判定: 避免在概率接近50时强行判定涨跌
-    verdict = "看涨" if prob >= 58 else ("看跌" if prob <= 42 else "震荡")
+    # 三段式判定: 避免在概率接近50时强行判定涨跌(阈值可由 v3.11 自动调参覆盖)
+    T = _MODULE_THRESHOLDS.get("idx_1h", 58)
+    verdict = "看涨" if prob >= T else ("看跌" if prob <= 100 - T else "震荡")
     chart = fetch_minute("sh000001")
     confidence = _confidence(prob, breadth)
     return {
@@ -789,8 +790,9 @@ def _build_idx_worker():
                     ai_p = rd[1]
                     w = FCONFIG.get("ai_fuse_w", AI_FUSED_W)
                     base["prob"] = round((1 - w) * base["prob"] + w * ai_p, 1)
-                    base["verdict"] = ("看涨" if base["prob"] >= 58
-                                       else "看跌" if base["prob"] <= 42 else "震荡")
+                    _T = _MODULE_THRESHOLDS.get("idx_1h", 58)
+                    base["verdict"] = ("看涨" if base["prob"] >= _T
+                                       else "看跌" if base["prob"] <= 100 - _T else "震荡")
                     base["ai_used"] = True
                     base["ai_prob"] = round(ai_p, 1)
                     base["confidence"] = _confidence(base["prob"], base.get("breadth", 0.5),
@@ -807,7 +809,11 @@ def _build_idx_worker():
                     log_prediction(
                         "idx_1h",
                         {"prob": base["prob"], "verdict": base["verdict"],
-                         "price": base["price"], "key": "上证指数"},
+                         "price": base["price"], "key": "上证指数",
+                         "feats": {"pct": base.get("pct", 0), "late": base.get("late", 0),
+                                   "pos": base.get("pos", 0.5), "vr": base.get("vr", 1),
+                                   "wb": base.get("weibi", 0), "breadth": base.get("breadth", 0.5),
+                                   "retail": base.get("retail", 0)}},
                         _add_trading_minutes(_now2, 60))
             except Exception:
                 traceback.print_exc()
@@ -1038,6 +1044,8 @@ def _ensure_runtime_data():
     # 2.5) 加载概率校准参数(Platt scaling), 保证重启后推荐概率延续上次校准结果
     _load_gapup_calib()
     _load_pred_calib()
+    # v3.11.0: 加载并应用自动调参结果(权重/阈值), 保证重启后延续上次调参
+    _apply_pred_tune()
     # 3) 加载调优后的权重(若存在)覆盖默认 gu_*(部分字典即可, gap_up_score 会合并到 FCONFIG)
     global GAPUP_WEIGHT_OVERRIDE
     if os.path.exists(GAPUP_TUNED):
@@ -1260,7 +1268,12 @@ def _build_pool_worker(force):
                                {"prob": c.get("blend_prob"), "verdict": "看涨",
                                 "qcode": _market_prefix(c["code"]) + c["code"],
                                 "key": c["name"], "pct": c.get("pct"),
-                                "dist": c.get("dist_limit_up")}, vat)
+                                "dist": c.get("dist_limit_up"),
+                                "feats": {"dist_limit_up": c.get("dist_limit_up", 15),
+                                          "vr": c.get("volratio", 1), "pct": c.get("pct", 0),
+                                          "wb": c.get("weibi", 0), "fmv": c.get("float_mv", 50),
+                                          "yao": bool(c.get("yao", False)), "yao_days": c.get("yao_days", 0),
+                                          "resonance": c.get("_resonance", 0)}}, vat)
             print(f"[pred-log] 盘前涨停预测落盘 {len(top)}条", flush=True)
         except Exception:
             traceback.print_exc()
@@ -1512,53 +1525,52 @@ def scan_limit_up():
 
 # ----------------------------- 尾盘次日概率 -----------------------------
 def nextday_prob(h, snap, ctx):
-    score = 0.0
+    # v3.11: 权重参数化到 FCONFIG stk_*(默认与旧硬编码一致, 行为不变); 返回 feats 供自动调参重打分
+    W = FCONFIG
     factors = []
     sh = next((i for i in snap["indices"] if i["code"] == "sh000001"), None)
     cyb = next((i for i in snap["indices"] if i["code"] == "sz399006"), None)
     sh_pct = sh["pct"] if sh else 0
     cyb_pct = cyb["pct"] if cyb else 0
-    c1 = sh_pct * 1.5 + cyb_pct * 1.0
-    score += c1
-    factors.append(("大盘", round(c1, 2), f"上证{sh_pct:+.2f}% 创业板{cyb_pct:+.2f}%"))
     sec = next((s for s in snap["sectors"] if s["code"] == h.get("sector_code")), None)
     sec_pct = sec["pct"] if sec else 0
-    c2 = sec_pct * 1.2
-    score += c2
-    factors.append((f"板块({h.get('sector_name','-')})", round(c2, 2), f"{sec_pct:+.2f}%"))
-    c3 = 1.5 if h.get("pct", 0) >= 0 else -1.5
-    score += c3
-    factors.append(("当日阴阳", round(c3, 2), "收阳" if h.get("pct", 0) >= 0 else "收阴"))
+    pct_pos = 1 if h.get("pct", 0) >= 0 else -1
     high, low, price = h.get("high", 0), h.get("low", 0), h.get("price", 0)
     rng = high - low
-    if rng > 0:
-        lower = (price - low) / rng
-        upper = (high - price) / rng
-        c4 = (lower - upper) * 1.5
-        score += c4
-        factors.append(("影线", round(c4, 2), f"下影{lower*100:.0f}% 上影{upper*100:.0f}%"))
+    lower = (price - low) / rng if rng > 0 else 0.5
+    upper = (high - price) / rng if rng > 0 else 0.5
     turnover = h.get("turnover", 0)
-    c5 = 0.5 if turnover >= 10 else 0
-    score += c5
-    factors.append(("量能", round(c5, 2), f"换手{turnover:.1f}%"))
     pnl_pct = h.get("pnl_pct", 0)
-    c6 = -0.8 if pnl_pct > 8 else (0.8 if pnl_pct < -8 else 0)
-    score += c6
+    breadth = ctx.get("breadth", 0.5)
+    retail_pct = ctx.get("retail_pct", 0)
+    late = ctx.get("late", 0)
+    c1 = sh_pct * W["stk_sh_w"] + cyb_pct * W["stk_cyb_w"]
+    c2 = sec_pct * W["stk_sec_w"]
+    c3 = W["stk_posmag"] if pct_pos >= 0 else -W["stk_posmag"]
+    c4 = (lower - upper) * W["stk_yin_w"]
+    c5 = W["stk_amt_w"] if turnover >= 10 else 0
+    c6 = -W["stk_pnl_neg"] if pnl_pct > 8 else (W["stk_pnl_pos"] if pnl_pct < -8 else 0)
+    c7 = (breadth - 0.5) * W["stk_breadth_w"]
+    c8 = retail_pct * W["stk_retail_w"]
+    c9 = late * W["stk_late_w"]
+    score = c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9
+    factors.append(("大盘", round(c1, 2), f"上证{sh_pct:+.2f}% 创业板{cyb_pct:+.2f}%"))
+    factors.append((f"板块({h.get('sector_name','-')})", round(c2, 2), f"{sec_pct:+.2f}%"))
+    factors.append(("当日阴阳", round(c3, 2), "收阳" if pct_pos >= 0 else "收阴"))
+    factors.append(("影线", round(c4, 2), f"下影{lower*100:.0f}% 上影{upper*100:.0f}%"))
+    factors.append(("量能", round(c5, 2), f"换手{turnover:.1f}%"))
     factors.append(("持仓位置", round(c6, 2), f"{pnl_pct:+.2f}%"))
-    # v2.8新增: 宽度/小盘/大盘尾盘动向 作为横截面因子(对所有持仓施加相同的环境偏移)
-    c7 = (ctx.get("breadth", 0.5) - 0.5) * 3.0
-    score += c7
-    factors.append(("宽度", round(c7, 2), f"上涨板块占比{ctx.get('breadth', 0.5):.2f}"))
-    c8 = ctx.get("retail_pct", 0) * 0.6
-    score += c8
-    factors.append(("小盘", round(c8, 2), f"国证2000{ctx.get('retail_pct', 0):+.2f}%"))
-    c9 = ctx.get("late", 0) * 1.2
-    score += c9
-    factors.append(("尾盘动向", round(c9, 2), f"上证尾盘{c9/1.2:+.2f}%"))
-    prob = 1 / (1 + math.exp(-score / 5.0)) * 100
-    verdict = "偏多" if prob >= 60 else ("偏空" if prob <= 40 else "震荡")
+    factors.append(("宽度", round(c7, 2), f"上涨板块占比{breadth:.2f}"))
+    factors.append(("小盘", round(c8, 2), f"国证2000{retail_pct:+.2f}%"))
+    factors.append(("尾盘动向", round(c9, 2), f"上证尾盘{late:+.2f}%"))
+    prob = 1 / (1 + math.exp(-score / W["stk_sig"])) * 100
+    T = _MODULE_THRESHOLDS.get("close_stock", 60)
+    verdict = "偏多" if prob >= T else ("偏空" if prob <= 100 - T else "震荡")
+    feats = {"sh_pct": sh_pct, "cyb_pct": cyb_pct, "sec_pct": sec_pct, "pct_pos": pct_pos,
+             "lower": lower, "upper": upper, "turnover": turnover, "pnl_pct": pnl_pct,
+             "breadth": breadth, "retail_pct": retail_pct, "late": late}
     return {"name": h["name"], "code": h["code"], "prob": round(prob, 1),
-            "verdict": verdict, "factors": factors}
+            "verdict": verdict, "factors": factors, "feats": feats}
 
 
 def close_prediction(snap):
@@ -1577,8 +1589,9 @@ def close_prediction(snap):
     mscore += late * FCONFIG["cl_late_w"]                    # 尾盘动向: 强预测力
     mprob = 1 / (1 + math.exp(-mscore / FCONFIG["cl_sig"])) * 100
     confidence = _confidence(mprob, breadth)
+    _T = _MODULE_THRESHOLDS.get("close_market", 58)
     market = {"prob": round(mprob, 1),
-              "verdict": ("偏多" if mprob >= 58 else "偏空" if mprob <= 42 else "震荡"),
+              "verdict": ("偏多" if mprob >= _T else "偏空" if mprob <= 100 - _T else "震荡"),
               "sh_pct": sh_pct, "cyb_pct": cyb_pct,
               "sector_avg": sector_avg, "breadth": breadth,
               "breadth_up": ctx["breadth_up"], "breadth_down": ctx["breadth_down"],
@@ -1619,8 +1632,9 @@ def _build_close_worker():
                 ai_p = rd[1]
                 w = FCONFIG.get("ai_fuse_w", AI_FUSED_W)
                 m["prob"] = round((1 - w) * m["prob"] + w * ai_p, 1)
-                m["verdict"] = ("偏多" if m["prob"] >= 58
-                                else "偏空" if m["prob"] <= 42 else "震荡")
+                _T = _MODULE_THRESHOLDS.get("close_market", 58)
+                m["verdict"] = ("偏多" if m["prob"] >= _T
+                                else "偏空" if m["prob"] <= 100 - _T else "震荡")
                 m["ai_prob"] = round(ai_p, 1)
                 m["confidence"] = _confidence(m["prob"], m.get("breadth", 0.5),
                                              ai_prob=ai_p, heuristic_prob=heuristic_prob)
@@ -1639,7 +1653,10 @@ def _build_close_worker():
             log_prediction("close_market",
                            {"prob": m["prob"], "verdict": m["verdict"],
                             "qcode": "sh000001", "key": "大盘(上证)",
-                            "base_close": sh_px}, vat)
+                            "base_close": sh_px,
+                            "feats": {"sh_pct": ctx["sh_pct"], "cyb_pct": ctx["cyb_pct"],
+                                      "sector_avg": ctx["sector_avg"], "breadth": ctx["breadth"],
+                                      "retail": ctx["retail_pct"], "late": ctx["late"]}}, vat)
             hpx = {h.get("code"): h.get("price") for h in snap.get("holdings", [])}
             for s in base.get("stocks", []):
                 code = s.get("code")
@@ -1649,7 +1666,8 @@ def _build_close_worker():
                                {"prob": s.get("prob"), "verdict": s.get("verdict"),
                                 "qcode": _market_prefix(code) + code,
                                 "key": s.get("name", code),
-                                "base_close": hpx.get(code)}, vat)
+                                "base_close": hpx.get(code),
+                                "feats": s.get("feats", {})}, vat)
             print(f"[pred-log] 尾盘预测落盘: 大盘1 + 个股{len(base.get('stocks', []))}条", flush=True)
         except Exception:
             traceback.print_exc()
@@ -2271,6 +2289,339 @@ def fit_pred_calib(module):
             "pred_mean": round(_logit_mean_pred(samples, B, A) * 100, 2),
             "actual_rate": round(actual_rate * 100, 2),
             "note": f"固定A={A:.3f}, 二分法求B={B:.3f}, 使预测均值≈实际发生率"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v3.11.0 自动调参引擎(按实盘表现调权重/阈值, 真正提升命中率)
+# ─────────────────────────────────────────────────────────────────────────────
+# 与 v3.10 校准的本质区别:
+#   校准(Platt)只让"概率数字"变诚实 —— 固定 A=1 纯平移, 不改排序、不提升准确度。
+#   本引擎改"打分权重"与"决策阈值" —— 改变排序与报警边界, 从而提升真实命中率。
+# 防过拟合三件套: ① 时间切分留出验证 ② L2 正则回拉默认权重 ③ 最小样本门控。
+# 权重自调依赖预测时落盘的特征(feats); 阈值自调仅用已存的 prob+ret, 无需特征。
+# ═══════════════════════════════════════════════════════════════════════════
+PRED_TUNE = f"{BASE}/pred_tune.json"
+MIN_TUNE_THRESH = 15      # 阈值自调最小样本(单参数, 门槛较低)
+MIN_TUNE_WEIGHT = 50      # 权重自调最小样本(参数多, 需更多样本防过拟合)
+_PRED_TUNE = {}           # 运行时调参结果(启动加载)
+
+# 各模块权重默认值(与 _FORECAST_DEFAULTS / SCFG 默认严格一致, 供 L2 正则回拉)
+_TUNE_W_DEFAULT = {
+    "idx_pct_w": 2.2, "idx_late_w": 1.8, "idx_pos_w": 2.0, "idx_vr_w": 1.0,
+    "idx_wb_w": 1.5, "idx_breadth_w": 3.0, "idx_retail_w": 0.8, "idx_sig": 6.0,
+    "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
+    "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
+    "stk_sh_w": 1.5, "stk_cyb_w": 1.0, "stk_sec_w": 1.2, "stk_yin_w": 1.5,
+    "stk_amt_w": 0.5, "stk_posmag": 1.5, "stk_pnl_pos": 0.8, "stk_pnl_neg": 0.8,
+    "stk_breadth_w": 3.0, "stk_retail_w": 0.6, "stk_late_w": 1.2, "stk_sig": 5.0,
+}
+_SCFG_W_DEFAULT = {
+    "limitup_weight": 0.6, "vr_weight": 1.5, "pct_weight": 0.8, "weibi_weight": 2.0,
+    "fv_optimal_bonus": 5.0, "fv_large_thresh": 100, "fv_large_penalty": -30.0,
+    "fv_mid_penalty": -5.0, "yao_consec_bonus": 15, "yao_consec_cap": 45,
+    "yao_smallcap_thresh": 30, "yao_smallcap_bonus": 5.0, "resonance_scale": 0.1,
+    "sig_scale": 6.0,
+}
+_TUNE_SPEC = {
+    "idx_1h": {"kind": "fcfg", "wkeys": [k for k in _TUNE_W_DEFAULT if k.startswith("idx_")],
+               "feats": ["pct", "late", "pos", "vr", "wb", "breadth", "retail"],
+               "def_thr": 58, "pos": "up"},
+    "close_market": {"kind": "fcfg", "wkeys": [k for k in _TUNE_W_DEFAULT if k.startswith("cl_")],
+               "feats": ["sh_pct", "cyb_pct", "sector_avg", "breadth", "retail", "late"],
+               "def_thr": 58, "pos": "up"},
+    "close_stock": {"kind": "fcfg", "wkeys": [k for k in _TUNE_W_DEFAULT if k.startswith("stk_")],
+               "feats": ["sh_pct", "cyb_pct", "sec_pct", "pct_pos", "lower", "upper",
+                         "turnover", "pnl_pct", "breadth", "retail_pct", "late"],
+               "def_thr": 60, "pos": "up"},
+    "preopen_limitup": {"kind": "scfg", "wkeys": list(_SCFG_W_DEFAULT.keys()),
+               "feats": ["dist_limit_up", "vr", "pct", "wb", "fmv", "yao", "yao_days", "resonance"],
+               "def_thr": 50, "pos": "limitup"},
+}
+
+
+def _rescore_idx(f, w):
+    s = (f["pct"] * w["idx_pct_w"] + f["late"] * w["idx_late_w"]
+         + (f["pos"] - 0.5) * w["idx_pos_w"] + (f["vr"] - 1) * w["idx_vr_w"]
+         + (f["wb"] / 100.0) * w["idx_wb_w"] + (f["breadth"] - 0.5) * w["idx_breadth_w"]
+         + f["retail"] * w["idx_retail_w"])
+    return 1 / (1 + math.exp(-s / w["idx_sig"])) * 100
+
+
+def _rescore_close_market(f, w):
+    s = (f["sh_pct"] * w["cl_sh_w"] + f["cyb_pct"] * w["cl_cyb_w"]
+         + f["sector_avg"] * w["cl_sec_w"] + (f["breadth"] - 0.5) * w["cl_breadth_w"]
+         + f["retail"] * w["cl_retail_w"] + f["late"] * w["cl_late_w"])
+    return 1 / (1 + math.exp(-s / w["cl_sig"])) * 100
+
+
+def _rescore_close_stock(f, w):
+    c1 = f["sh_pct"] * w["stk_sh_w"] + f["cyb_pct"] * w["stk_cyb_w"]
+    c2 = f["sec_pct"] * w["stk_sec_w"]
+    c3 = w["stk_posmag"] if f["pct_pos"] >= 0 else -w["stk_posmag"]
+    c4 = (f["lower"] - f["upper"]) * w["stk_yin_w"]
+    c5 = w["stk_amt_w"] if f["turnover"] >= 10 else 0
+    c6 = -w["stk_pnl_neg"] if f["pnl_pct"] > 8 else (w["stk_pnl_pos"] if f["pnl_pct"] < -8 else 0)
+    c7 = (f["breadth"] - 0.5) * w["stk_breadth_w"]
+    c8 = f["retail_pct"] * w["stk_retail_w"]
+    c9 = f["late"] * w["stk_late_w"]
+    return 1 / (1 + math.exp(-(c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9) / w["stk_sig"])) * 100
+
+
+def _rescore_preopen(f, w):
+    s = 0.0
+    s += (15 - f["dist_limit_up"]) * w["limitup_weight"]
+    vr = f["vr"] if 0 < f["vr"] <= 10 else 1
+    s += (vr - 1) * w["vr_weight"]
+    s += min(f["pct"], 9) * w["pct_weight"]
+    wb = f["wb"] if 0 <= f["wb"] <= 100 else 0
+    s += (wb / 100.0) * w["weibi_weight"]
+    fmv = f["fmv"] or 50
+    if 30 <= fmv <= 80:
+        s += w["fv_optimal_bonus"]
+    elif fmv > w.get("fv_large_thresh", 100):
+        if not f["yao"]:
+            s += w["fv_large_penalty"]
+    elif fmv > 80:
+        s += w["fv_mid_penalty"]
+    if f["yao"]:
+        yd = f["yao_days"] or 0
+        s += min(yd * w["yao_consec_bonus"], w["yao_consec_cap"])
+        if fmv < w.get("yao_smallcap_thresh", 30):
+            s += w["yao_smallcap_bonus"]
+    s += (f.get("resonance") or 0) * w["resonance_scale"]
+    return 1 / (1 + math.exp(-s / w["sig_scale"])) * 100
+
+
+_RESCORE = {"idx_1h": _rescore_idx, "close_market": _rescore_close_market,
+            "close_stock": _rescore_close_stock, "preopen_limitup": _rescore_preopen}
+
+# 决策阈值(verdict 边界), 默认与线上硬编码一致; 自动调参后覆盖
+_MODULE_THRESHOLDS = {m: _TUNE_SPEC[m]["def_thr"] for m in _TUNE_SPEC}
+
+
+def _threshold_metrics(probs, rets, T, pos_kind):
+    """阈值 T 下的精确率/召回率/F1。pos_kind='up'->实际涨(ret>0)为正; 'limitup'->涨停为正。"""
+    act_pos = (lambda r: r > 0) if pos_kind == "up" else (lambda r: r >= LIMITUP_HIT_PCT)
+    ys, ps = [], []
+    for p, r in zip(probs, rets):
+        ys.append(1 if act_pos(r) else 0)
+        ps.append(1 if p >= T else 0)
+    if not ys:
+        return (0.0, 0.0, 0.0, 0)
+    tp = sum(1 for y, p in zip(ys, ps) if y == 1 and p == 1)
+    fp = sum(1 for y, p in zip(ys, ps) if y == 0 and p == 1)
+    fn = sum(1 for y, p in zip(ys, ps) if y == 1 and p == 0)
+    prec = tp / (tp + fp) if (tp + fp) else 0.0
+    rec = tp / (tp + fn) if (tp + fn) else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0.0
+    return (prec, rec, f1, tp + fp)
+
+
+def _collect_thr_samples(module):
+    out = []
+    for r in _load_pred_log():
+        if r.get("module") != module or not r.get("verified"):
+            continue
+        a = r.get("actual") or {}
+        ret = a.get("ret")
+        if ret is None:
+            continue
+        p = (r.get("pred") or {}).get("prob")
+        if not isinstance(p, (int, float)) or not (0 < p < 100):
+            continue
+        out.append((float(p), float(ret)))
+    return out
+
+
+def _collect_w_samples(module):
+    out = []
+    for r in _load_pred_log():
+        if r.get("module") != module or not r.get("verified"):
+            continue
+        a = r.get("actual") or {}
+        ret = a.get("ret")
+        if ret is None:
+            continue
+        f = (r.get("pred") or {}).get("feats")
+        if not isinstance(f, dict):
+            continue
+        out.append((f, float(ret)))
+    return out
+
+
+def _current_weights(module, spec):
+    src = FCONFIG if spec["kind"] == "fcfg" else SCFG
+    default = _TUNE_W_DEFAULT if spec["kind"] == "fcfg" else _SCFG_W_DEFAULT
+    return {k: float(src.get(k, default[k])) for k in spec["wkeys"]}
+
+
+def _tune_threshold(module, samples, spec):
+    """网格搜最优报警阈值, 目标 F1; 预测为正太少则惩罚防退化解; L2 回拉默认阈值。"""
+    probs = [p for p, _ in samples]
+    rets = [r for _, r in samples]
+    def_thr, pos = spec["def_thr"], spec["pos"]
+    lo, hi = (45, 85) if pos == "up" else (30, 90)
+    best = None
+    for T in range(lo, hi + 1, 5):
+        prec, rec, f1, np_ = _threshold_metrics(probs, rets, T, pos)
+        score = f1 - (0.5 if np_ < 3 else 0.0) - 0.03 * abs(T - def_thr) / def_thr
+        if best is None or score > best[0]:
+            best = (score, T, prec, rec, f1, np_)
+    _, T, prec, rec, f1, np_ = best
+    dp, dr, df1, _ = _threshold_metrics(probs, rets, def_thr, pos)
+    return {"threshold": T, "f1": round(f1, 4), "prec": round(prec, 4),
+            "rec": round(rec, 4), "def_f1": round(df1, 4), "def_thr": def_thr,
+            "n_pos_pred": np_,
+            "lift": round(f1 - df1, 4)}
+
+
+def _tune_weights(module, samples, spec):
+    """正则化坐标上升调权重, 目标=留出验证集 F1(每层配最优阈值); L2 回拉默认防过拟合。"""
+    rescore = _RESCORE[module]
+    W0 = _current_weights(module, spec)
+    k = max(1, int(len(samples) * 0.2))
+    train = samples[:-k] if len(samples) > 5 else samples
+    test = samples[-k:] if len(samples) > 5 else samples
+
+    def f1_at(w, split):
+        probs = [rescore(f, w) for f, _ in split]
+        rets = [r for _, r in split]
+        lo, hi = (45, 85) if spec["pos"] == "up" else (30, 90)
+        best = 0.0
+        for TT in range(lo, hi + 1, 5):       # 内层: 该权重集下的最优阈值
+            _, _, ff, _ = _threshold_metrics(probs, rets, TT, spec["pos"])
+            best = max(best, ff)
+        return best
+
+    w = dict(W0)
+    lam = 0.03
+    facs = [0.6, 0.8, 1.0, 1.25, 1.6, 2.0]
+    sig_facs = [0.7, 0.85, 1.0, 1.18, 1.4]
+    for _ in range(4):
+        improved = False
+        for key in spec["wkeys"]:
+            is_sig = key.endswith("_sig") or key == "sig_scale"
+            cand_facs = sig_facs if is_sig else facs
+            base = w[key]
+            reg0 = lam * ((base - W0[key]) / max(0.1, abs(W0[key]))) ** 2
+            best_score = f1_at(w, train) - reg0
+            best_val = base
+            for fac in cand_facs:
+                cand = base * fac
+                if is_sig and cand <= 0.5:
+                    continue
+                old = w[key]
+                w[key] = cand
+                reg = lam * ((w[key] - W0[key]) / max(0.1, abs(W0[key]))) ** 2
+                sc = f1_at(w, train) - reg
+                if sc > best_score + 1e-9:
+                    best_score = sc
+                    best_val = cand
+                    improved = True
+                w[key] = old
+            w[key] = best_val
+        if not improved:
+            break
+    w_now = _current_weights(module, spec)
+    diff = {k: round(v, 4) for k, v in w.items() if abs(v - w_now[k]) > 1e-6}
+    return (w, round(f1_at(w, train), 4), round(f1_at(w, test), 4),
+            round(f1_at(W0, test), 4), round(sum(abs(w[k] - w_now[k]) for k in w) / len(w), 4), diff)
+
+
+def auto_tune_module(module):
+    """对单模块做阈值+权重自调, 落盘并立即应用。样本不足则返回'待激活'。"""
+    if module not in _TUNE_SPEC:
+        return {"ok": False, "reason": "未纳入自动调参"}
+    spec = _TUNE_SPEC[module]
+    res = {"module": module, "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")}
+    # —— 阈值自调 ——
+    ts = _collect_thr_samples(module)
+    n_thr = len(ts)
+    if n_thr >= MIN_TUNE_THRESH:
+        try:
+            t = _tune_threshold(module, ts, spec)
+            t["n"] = n_thr
+            res["threshold"] = t
+        except Exception:
+            traceback.print_exc()
+    else:
+        res["threshold"] = {"n": n_thr, "status": "待激活", "need": MIN_TUNE_THRESH}
+    # —— 权重自调(需特征) ——
+    ws = _collect_w_samples(module)
+    n_w = len(ws)
+    if n_w >= MIN_TUNE_WEIGHT:
+        try:
+            w, tf, tef, df, drift, diff = _tune_weights(module, ws, spec)
+            res["weights"] = {"n": n_w, "f1_train": tf, "f1_test": tef,
+                              "f1_test_default": df, "drift": drift, "values": diff}
+        except Exception:
+            traceback.print_exc()
+    else:
+        res["weights"] = {"n": n_w, "status": "待激活", "need": MIN_TUNE_WEIGHT}
+    _PRED_TUNE[module] = res
+    _save_pred_tune()
+    _apply_pred_tune_one(module)
+    return res
+
+
+def auto_tune_all():
+    out = {}
+    for m in _TUNE_SPEC:
+        try:
+            out[m] = auto_tune_module(m)
+        except Exception:
+            traceback.print_exc()
+    return out
+
+
+def _save_pred_tune():
+    try:
+        tmp = PRED_TUNE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_PRED_TUNE, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PRED_TUNE)
+    except Exception:
+        pass
+
+
+def _load_pred_tune():
+    global _PRED_TUNE
+    try:
+        if os.path.exists(PRED_TUNE):
+            d = json.load(open(PRED_TUNE, encoding="utf-8"))
+            if isinstance(d, dict):
+                _PRED_TUNE = d
+    except Exception:
+        pass
+
+
+def _apply_pred_tune_one(module):
+    """把单模块已保存的调参结果覆盖到 FCONFIG/SCFG/决策阈值。"""
+    res = _PRED_TUNE.get(module)
+    if not res:
+        return
+    spec = _TUNE_SPEC[module]
+    thr = (res.get("threshold") or {}).get("threshold")
+    if isinstance(thr, (int, float)):
+        _MODULE_THRESHOLDS[module] = int(round(thr))
+    wv = (res.get("weights") or {}).get("values")
+    if isinstance(wv, dict) and wv:
+        dst = FCONFIG if spec["kind"] == "fcfg" else SCFG
+        for k, v in wv.items():
+            dst[k] = float(v)
+
+
+def _apply_pred_tune():
+    """启动加载并应用全部已保存调参结果(权重/阈值)。"""
+    _load_pred_tune()
+    applied = []
+    for m in _TUNE_SPEC:
+        before = _MODULE_THRESHOLDS.get(m)
+        _apply_pred_tune_one(m)
+        if _MODULE_THRESHOLDS.get(m) != before:
+            applied.append(f"{m}:阈值->{_MODULE_THRESHOLDS[m]}")
+    if applied:
+        print("[init] 已应用自动调参(阈值):", applied, flush=True)
 
 
 def gap_up_raw_score(d, ctx=None, late_pull=0.0):
@@ -3202,6 +3553,20 @@ def verify_predictions():
                               f"预测均值={cb['pred_mean']}% 实际={cb['actual_rate']}%", flush=True)
                 except Exception:
                     traceback.print_exc()
+            # v3.11.0: 每次回填后自动调参(阈值+权重), 达到样本阈值才生效, 否则显示待激活
+            for m in _TUNE_SPEC:
+                try:
+                    rt = auto_tune_module(m)
+                    thr = rt.get("threshold", {})
+                    if thr.get("status") != "待激活":
+                        print(f"[pred-tune] {m} 阈值={thr.get('threshold')} "
+                              f"F1={thr.get('f1')}(默认{thr.get('def_f1')}) n={thr.get('n')}", flush=True)
+                    w = rt.get("weights", {})
+                    if w.get("status") != "待激活":
+                        print(f"[pred-tune] {m} 权重漂移={w.get('drift')} "
+                              f"测试F1={w.get('f1_test')}(默认{w.get('f1_test_default')}) n={w.get('n')}", flush=True)
+                except Exception:
+                    traceback.print_exc()
         return done
     except Exception:
         traceback.print_exc()
@@ -3635,15 +4000,51 @@ def api_idx():
 @app.route("/api/pred_stats")
 def api_pred_stats():
     """v3.10: 各预测模块的命中率/校准偏差回测统计。?refresh=1 强制重算。"""
-    if request.args.get("refresh") in ("1", "true"):
-        return jsonify(_recompute_pred_stats())
-    return jsonify(load_pred_stats())
+    s = _recompute_pred_stats() if request.args.get("refresh") in ("1", "true") else load_pred_stats()
+    # v3.11.0: 附加各模块自动调参状态(阈值/权重), 供面板展示
+    s["tune"] = {m: _PRED_TUNE.get(m) for m in _TUNE_SPEC}
+    s["tune_meta"] = {"min_thr": MIN_TUNE_THRESH, "min_w": MIN_TUNE_WEIGHT}
+    return jsonify(s)
 
 
 @app.route("/api/pred_verify")
 def api_pred_verify():
     """手动触发一次预测回测回填(调试用)。"""
     return jsonify({"done": verify_predictions(), "stats": load_pred_stats()})
+
+
+@app.route("/api/tune", methods=["POST"])
+def api_tune():
+    """v3.11.0: 手动触发全部模块自动调参(阈值+权重)。达到样本阈值才生效, 否则保持待激活。"""
+    out = auto_tune_all()
+    return jsonify({"ok": True, "tuned": {m: {
+        "threshold": (r.get("threshold") or {}).get("status", "ok"),
+        "weights": (r.get("weights") or {}).get("status", "ok")} for m, r in out.items()}})
+
+
+@app.route("/api/tune_reset", methods=["POST"])
+def api_tune_reset():
+    """v3.11.0: 清除自动调参结果, 恢复默认权重/阈值。"""
+    global _PRED_TUNE
+    _PRED_TUNE = {}
+    try:
+        if os.path.exists(PRED_TUNE):
+            os.remove(PRED_TUNE)
+    except Exception:
+        pass
+    for k in list(FCONFIG.keys()):
+        if k in _TUNE_W_DEFAULT:
+            FCONFIG[k] = _TUNE_W_DEFAULT[k]
+    for k in list(SCFG.keys()):
+        if k in _SCFG_W_DEFAULT:
+            SCFG[k] = _SCFG_W_DEFAULT[k]
+    for m in _TUNE_SPEC:
+        _MODULE_THRESHOLDS[m] = _TUNE_SPEC[m]["def_thr"]
+    try:
+        _recompute_pred_stats()
+    except Exception:
+        pass
+    return jsonify({"ok": True, "msg": "已恢复默认权重与阈值"})
 
 
 @app.route("/api/daily_bars")
@@ -3895,6 +4296,8 @@ td:first-child,th:first-child{text-align:left}
 .prob{font-size:24px;font-weight:700}
 .gauge{display:inline-block;font-size:22px;font-weight:700}
 .eye{cursor:pointer;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:16px;padding:4px 10px;line-height:1}
+.gv-toolbar .gv-btn{background:var(--blue,#2f80ed);color:#06121f;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}
+.gv-toolbar .gv-btn:hover{opacity:.88}
 .eye:hover{border-color:var(--blue)}
 .masked{color:var(--mut);letter-spacing:2px}
 .minichart{width:100%;height:130px;margin-top:10px;border-radius:8px;background:var(--chart-bg)}
@@ -4269,9 +4672,17 @@ function renderPredStats(s){
   const box=document.getElementById('predstats');
   if(!box) return;
   const mods=(s&&s.modules)||{};
+  const tune=(s&&s.tune)||{};
+  const tmeta=(s&&s.tune_meta)||{};
   const keys=Object.keys(PRED_LABELS).filter(k=>mods[k]);
+  // v3.11.0: 顶部工具条(自动调参操作 + 门控说明)
+  const head='<div class="gv-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">'
+    +'<button class="gv-btn" onclick="tuneNow(this)">🔧 重新调参</button>'
+    +'<button class="gv-btn" onclick="tuneReset()">↺ 恢复默认</button>'
+    +`<span class="note" style="margin:0">自动调参随样本累积生效：阈值≥${tmeta.min_thr||15}，权重≥${tmeta.min_w||50}（权重多、需更多样本防过拟合）</span>`
+    +'</div>';
   if(!keys.length){
-    box.innerHTML='<div class="note">暂无回测样本。预测落盘后按到期时刻自动回填真实结果（上证1小时当日验证，尾盘/涨停次日或当日收盘验证），样本会随交易日积累。</div>';
+    box.innerHTML=head+'<div class="note">暂无回测样本。预测落盘后按到期时刻自动回填真实结果（上证1小时当日验证，尾盘/涨停次日或当日收盘验证），样本会随交易日积累。</div>';
     return;
   }
   let r='<div class="gv-list">';
@@ -4293,6 +4704,21 @@ function renderPredStats(s){
       ? `<span class="gv-prob" style="color:var(--green,#2ecc71)">✓已校准(n=${cb.n})</span>`
       : `<span class="gv-prob flat">未校准(${cb.n||0}/${PRED_MIN_CALIB||12})</span>`;
     r+=`<div class="gv-opt-row" style="padding-left:10px">${calibBadge}</div>`;
+    // v3.11.0: 自动调参(阈值+权重)徽章
+    const tn=tune[k]||{};
+    const thr=tn.threshold||{}; const wt=tn.weights||{};
+    let tuneBadge;
+    if(thr.threshold!=null){
+      tuneBadge='<span class="gv-prob" style="color:var(--green,#2ecc71)">✓已调参 阈值'+thr.threshold
+        +' F1 '+thr.def_f1+'→'+thr.f1;
+      if(wt.values&&Object.keys(wt.values).length) tuneBadge+=' 权重漂移'+wt.drift;
+      tuneBadge+=' (n='+thr.n+')</span>';
+    } else {
+      const need=Math.max(thr.need||0, wt.need||0);
+      const have=Math.max(thr.n||0, wt.n||0);
+      tuneBadge='<span class="gv-prob flat">待激活('+have+'/'+need+')</span>';
+    }
+    r+=`<div class="gv-opt-row" style="padding-left:10px">${tuneBadge}</div>`;
     // 分方向明细(紧凑一行)
     const bv=e.by_verdict||{};
     const detail=Object.keys(bv).map(v=>{
@@ -4305,8 +4731,10 @@ function renderPredStats(s){
   // 校准说明: 偏差>0 表示模型宣称的概率系统性高于实际发生率(过度自信)
   const anyBias=keys.some(k=>mods[k].bias_pp!=null&&Math.abs(mods[k].bias_pp)>5);
   if(anyBias) r+='<div class="note" style="margin-top:6px">提示: 偏差为"平均预测概率 − 实际命中率"。偏差>5pp 说明该模块概率过度自信，样本≥12 后可启用概率校准自动修正。</div>';
-  box.innerHTML=r;
+  box.innerHTML=head+r;
 }
+function tuneNow(b){if(b){b.disabled=true;b.textContent='⏳ 调参中…';} fetch('/api/tune',{method:'POST'}).then(()=>loadPredStats()).finally(()=>{if(b){b.disabled=false;b.textContent='🔧 重新调参';}});}
+function tuneReset(){fetch('/api/tune_reset',{method:'POST'}).then(()=>loadPredStats()).catch(()=>{});}
 function loadPredStats(){fetch('/api/pred_stats').then(r=>r.json()).then(renderPredStats).catch(()=>{});}
 function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();}
 function manual(t){
