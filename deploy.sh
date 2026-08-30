@@ -95,7 +95,7 @@ node "$PUBLISH_JS" --dir "$BASE_DIR"
 
 echo "==> [3/3] 提交并推送到 GitHub (每次迭代即同步)..."
 VER=$(grep -o 'VERSION = "[^"]*"' "$BASE_DIR/app.py" | head -1 | sed 's/VERSION = "//;s/"//')
-git add README.md app.py dashboard_snapshot.html deploy.sh
+git add README.md app.py dashboard_snapshot.html deploy.sh .gitignore
 if git diff --cached --quiet; then
   echo "  ✓ 无源码变更, 跳过提交"
 else

@@ -16,7 +16,7 @@ import requests
 
 BASE = "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.9.5"
+VERSION = "v3.10.0"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -29,6 +29,28 @@ GAPUP_OPT_MULTIPLIERS = [0.6, 0.8, 1.25, 1.5, 2.0]  # 坐标上升尝试的权�
 GAPUP_OPT_REG = 0.02          # L2 正则强度(向默认权重回拉, 抑制小样本过拟合)
 GAPUP_OPT_CAL = 0.3           # 校准惩罚强度(预测均值 vs 实际高开率)
 GAPUP_WEIGHT_OVERRIDE = None                    # 调优时临时覆盖 FCONFIG 的 gu_* 权重
+# v3.10: 高开"命中"判定阈值(%). 原为 >0 即算命中, 导致 +0.01% 噪声级波动也计入,
+# 现要求有意义的高开幅度; 同时保留宽松(>0)与严格(>=阈值)双命中率指标。
+GAPUP_MIN_GAP_PCT = 0.5
+# v3.10: Platt scaling 概率校准文件(把原始 score 映射为真实高开概率)
+GAPUP_CALIB = f"{BASE}/gapup_calib.json"
+GAPUP_MIN_CALIB_SAMPLES = 12   # 少于该已验证样本数则不启用校准(防小样本过拟合)
+
+# v3.10: 上证指数1小时预测刷新频率(秒)。预测本体每5秒随行情刷新,
+# 但 AI 融合与分时图降频, 避免高频打爆接口。
+IDX_FORECAST_SEC = 5          # 预测本体刷新间隔(秒)
+IDX_AI_FUSE_SEC = 120         # AI 方向融合最小间隔(秒), 远程AI较慢故降频
+MINUTE_CACHE_TTL = 30         # 分时数据缓存秒数(一次抓取供多处复用)
+
+# v3.10: 本地日线库(自建历史K线, 突破"沙箱无历史数据"限制)
+DAILY_BARS = f"{BASE}/daily_bars.jsonl"   # 每行一条 {code,date,open,high,low,close,vol,...}
+DAILY_KEEP_DAYS = 250         # 日线保留天数(约1年交易日), 超出自动清理
+DAILY_MAX_MB = 120            # 日线库文件大小上限(MB), 超限则清理最旧数据
+DAILY_UNIVERSE_LIMIT = 0      # 0=全市场; >0 则只存前N只(按代码序), 用于限制体积
+
+# v3.10: 通用预测回测闭环(上证1小时/尾盘大盘/尾盘个股/开盘前涨停)
+PRED_LOG = f"{BASE}/pred_log.jsonl"
+PRED_STATS = f"{BASE}/pred_stats.json"
 
 with open(f"{BASE}/portfolio.json", "r", encoding="utf-8") as f:
     CFG = json.load(f)
@@ -322,10 +344,13 @@ def auto_classify(code, market=None, name="", use_cache=True):
 STATE = {
     "latest": None, "last_update": None, "trading": False,
     "preopen": None, "preopen_date": None, "close": None, "close_date": None,
-    "idx_forecast": None, "idx_forecast_time": None,
+    "idx_forecast": None, "idx_forecast_time": None, "idx_ai_time": None,
     "sector_drivers": None, "sector_drivers_time": None,
     "gapup": None, "gapup_date": None,
     "alerts": [], "is_weekday": True,
+    # v3.10: 预测回测闭环 + 本地日线库
+    "gapup_verify_date": None, "pred_verify_time": None,
+    "idx_predlog_time": None, "daily_bars_date": None,
 }
 LOCK = threading.Lock()
 
@@ -476,6 +501,7 @@ def parse_row(p):
         "weibi": num(g(F["weibi"])), "volratio": num(g(F["volratio"])),
         "float_mv": num(g(F["float_mv"])),  # 单位: 亿
         "amount_wan": num(g(F["amount_wan"])),
+        "vol": num(g(F["vol"])),             # 成交量(手), v3.10 供本地日线库落库
     }
 
 
@@ -584,9 +610,20 @@ def enrich_holding(h, q):
 
 
 # ----------------------------- 上证指数 1小时预测 -----------------------------
-def fetch_minute(code):
+# v3.10: 分时数据缓存。指数预测改为5秒刷新后, 一次预测会多次用到同一份分时数据
+# (_market_context 算"尾盘动向" + chart 画图), 缓存可把实际请求降到 TTL 一次。
+_MINUTE_CACHE = {}
+
+def fetch_minute(code, ttl=None):
     """腾讯分时数据, 返回 [{'t':'HHMM','p':price},...]
-    v3.0: 流式读取+整体超时, 防止分时接口挂起阻塞。"""
+    v3.0: 流式读取+整体超时, 防止分时接口挂起阻塞。
+    v3.10: 加 TTL 缓存(默认 MINUTE_CACHE_TTL 秒), 供高频刷新复用, 降低接口压力。
+           抓取失败时回退到上一次的缓存结果(若有), 避免瞬时故障导致图表/特征丢失。"""
+    ttl = MINUTE_CACHE_TTL if ttl is None else ttl
+    now_ts = time.time()
+    cached = _MINUTE_CACHE.get(code)
+    if ttl > 0 and cached and (now_ts - cached[0]) < ttl:
+        return cached[1]
     try:
         url = f"https://ifzq.gtimg.cn/appstock/app/minute/query?code={code}"
         with requests.get(url, headers=HEADERS, timeout=(3, 6), stream=True) as r:
@@ -601,9 +638,13 @@ def fetch_minute(code):
                     out.append({"t": parts[0], "p": float(parts[1])})
                 except Exception:
                     pass
-        return out
+        if out:
+            _MINUTE_CACHE[code] = (now_ts, out)
+            return out
     except Exception:
-        return []
+        pass
+    # 抓取失败: 回退旧缓存
+    return cached[1] if cached else []
 
 
 def _market_context(snap=None):
@@ -725,7 +766,14 @@ def _build_idx_worker():
         if "error" not in base:
             ai = AIClient()
             heuristic_prob = base["prob"]
-            if ai.available:
+            # v3.10: 预测本体已提频到5秒, 但远程AI较慢, AI融合按 IDX_AI_FUSE_SEC 降频,
+            # 两次AI之间直接采用纯启发式结果(随行情5秒更新), 避免高频打爆AI接口。
+            _now = beijing_now()
+            last_ai = STATE.get("idx_ai_time")
+            ai_due = (not last_ai) or (_now - last_ai).total_seconds() >= IDX_AI_FUSE_SEC
+            if ai.available and ai_due:
+                STATE["idx_ai_time"] = _now
+            if ai.available and ai_due:
                 feat = {"pct": base["pct"], "pos": base["pos"],
                         "weibi": base["weibi"], "vr": base["vr"],
                         "breadth": base.get("breadth", 0.5),
@@ -746,6 +794,19 @@ def _build_idx_worker():
                     base["note"] = (base["note"] +
                                     f" ｜ 启发式{heuristic_prob:.1f}% + AI{ai_p:.1f}% "
                                     f"→ 融合(AI权重{w}){base['prob']:.1f}%")
+            # v3.10: 落盘待回测(预测5秒一次, 落盘按 IDX_PRED_LOG_SEC 节流, 避免日志爆炸)
+            try:
+                _now2 = beijing_now()
+                last_lp = STATE.get("idx_predlog_time")
+                if (not last_lp or (_now2 - last_lp).total_seconds() >= IDX_PRED_LOG_SEC):
+                    STATE["idx_predlog_time"] = _now2
+                    log_prediction(
+                        "idx_1h",
+                        {"prob": base["prob"], "verdict": base["verdict"],
+                         "price": base["price"], "key": "上证指数"},
+                        _add_trading_minutes(_now2, 60))
+            except Exception:
+                traceback.print_exc()
             with LOCK:
                 STATE["idx_forecast"] = base
     except Exception as e:
@@ -970,6 +1031,8 @@ def _ensure_runtime_data():
             print(f"[init] portfolio.json 缺失, 已用示例模板初始化", flush=True)
     if not os.path.exists(GAPUP_LOG):
         _seed_gapup_baseline()
+    # 2.5) 加载概率校准参数(Platt scaling), 保证重启后推荐概率延续上次校准结果
+    _load_gapup_calib()
     # 3) 加载调优后的权重(若存在)覆盖默认 gu_*(部分字典即可, gap_up_score 会合并到 FCONFIG)
     global GAPUP_WEIGHT_OVERRIDE
     if os.path.exists(GAPUP_TUNED):
@@ -1179,6 +1242,18 @@ def _build_pool_worker(force):
                 STATE["preopen_date"] = today
         except Exception:
             pass
+        # v3.10: 落盘待回测(盘前涨停预测 → 当日收盘验证是否真涨停)
+        try:
+            vat = today + " 15:05:00"
+            for c in top:
+                log_prediction("preopen_limitup",
+                               {"prob": c.get("blend_prob"), "verdict": "看涨",
+                                "qcode": _market_prefix(c["code"]) + c["code"],
+                                "key": c["name"], "pct": c.get("pct"),
+                                "dist": c.get("dist_limit_up")}, vat)
+            print(f"[pred-log] 盘前涨停预测落盘 {len(top)}条", flush=True)
+        except Exception:
+            traceback.print_exc()
     finally:
         with _CAND_LOCK:
             _CAND_BUILDING = False
@@ -1543,6 +1618,31 @@ def _build_close_worker():
                 base["note"] = (base["note"] +
                                 f" ｜ 启发式{heuristic_prob:.1f}% + AI{ai_p:.1f}% "
                                 f"→ 融合(AI权重{w}){m['prob']:.1f}%")
+        # v3.10: 落盘待回测(大盘1条 + 每只持仓1条, 次日收盘后回填真实涨跌)
+        # base_close 记录预测时的最新价(14:50≈收盘), 供实时行情兜底时校验基准对齐
+        try:
+            _now2 = beijing_now()
+            nd = _next_trading_day(_now2)
+            vat = nd.strftime("%Y-%m-%d") + " 15:05:00"
+            sh_px = next((i.get("price") for i in snap.get("indices", [])
+                          if i.get("code") == "sh000001"), None)
+            log_prediction("close_market",
+                           {"prob": m["prob"], "verdict": m["verdict"],
+                            "qcode": "sh000001", "key": "大盘(上证)",
+                            "base_close": sh_px}, vat)
+            hpx = {h.get("code"): h.get("price") for h in snap.get("holdings", [])}
+            for s in base.get("stocks", []):
+                code = s.get("code")
+                if not code:
+                    continue
+                log_prediction("close_stock",
+                               {"prob": s.get("prob"), "verdict": s.get("verdict"),
+                                "qcode": _market_prefix(code) + code,
+                                "key": s.get("name", code),
+                                "base_close": hpx.get(code)}, vat)
+            print(f"[pred-log] 尾盘预测落盘: 大盘1 + 个股{len(base.get('stocks', []))}条", flush=True)
+        except Exception:
+            traceback.print_exc()
         with LOCK:
             STATE["close"] = base
     except Exception as e:
@@ -1944,12 +2044,123 @@ class AIClient:
         return ("local", p) if p is not None else None
 
 
-def gap_up_score(d, ctx=None, late_pull=0.0):
-    """启发式: 下个交易日开盘高开概率(0-100)。v2.8加入 尾盘拉升/宽度/小盘/大盘尾盘动向。
-    v3.4: 支持权重覆盖(_GAPUP_WEIGHT_OVERRIDE), 供调优时临时替换 gu_* 权重。"""
+# ---------------- v3.10: 概率校准(Platt scaling) ----------------
+# 问题: sigmoid(score/gu_sig) 只是单调变换, gu_sig 是拍脑袋定的, 输出并非真实概率。
+# 实测: 宣称 66.9% 概率, 实际高开率仅 40%(严格≥0.5% 仅 20%), 校准偏差 +26.9pp。
+# 方案: 用已验证样本 (score, 是否真高开) 拟合 Platt scaling: P = 1/(1+exp(A*score+B)),
+# 让输出概率名副其实。样本不足时自动降级不启用, 避免小样本过拟合。
+_GAPUP_CALIB = {"A": None, "B": None, "n": 0, "fitted_at": None}
+
+def _load_gapup_calib():
+    """启动时加载已拟合的校准参数(A/B)。"""
+    global _GAPUP_CALIB
+    try:
+        if os.path.exists(GAPUP_CALIB):
+            with open(GAPUP_CALIB, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            if d.get("A") is not None and d.get("B") is not None:
+                _GAPUP_CALIB.update(d)
+                print(f"[init] 已加载概率校准: A={d['A']} B={d['B']} n={d.get('n')}", flush=True)
+    except Exception:
+        pass
+
+def _apply_gapup_calib(score, raw_prob):
+    """把原始概率按 Platt scaling 校准; 未拟合/样本不足时原样返回。"""
+    A, B = _GAPUP_CALIB.get("A"), _GAPUP_CALIB.get("B")
+    if A is None or B is None or _GAPUP_CALIB.get("n", 0) < GAPUP_MIN_CALIB_SAMPLES:
+        return raw_prob
+    try:
+        # 注意符号: sigmoid(z)=1/(1+exp(-z)), 与 gap_up_score 的 exp(-score/gu_sig) 同向,
+        # 保证 score 越大概率越高(此前误写成 exp(z) 导致方向反转, 校准结果全错)。
+        z = A * score + B
+        if z > 60: z = 60.0
+        if z < -60: z = -60.0
+        return 1 / (1 + math.exp(-z)) * 100
+    except Exception:
+        return raw_prob
+
+def fit_gapup_calib():
+    """v3.10: 概率校准。固定 A=1/gu_sig(保持排序与尺度不变), 只用二分法求 B,
+    使"平均预测概率" = "实际高开发生率"(先验平移校准)。
+
+    为何不用完整两参数 Platt: 当前仅 20 样本, 两参数梯度下降会过拟合(A 爆炸到 54,
+    预测全压向 0%)。固定 A 后, 校准只做 logit 平移, 不改变排序(不损失 AUC),
+    只把概率整体搬到真实水平, 小样本下稳健得多。
+    标签按当前阈值 GAPUP_MIN_GAP_PCT 重算, 保证与命中率口径一致。"""
+    global _GAPUP_CALIB
+    samples = []   # (score, y)
+    for rec in _load_gapup_log():
+        if not rec.get("verified"):
+            continue
+        actual = {a.get("code"): a for a in rec.get("actual", [])}
+        for s in rec.get("stocks", []):
+            a = actual.get(s.get("code"))
+            if not a:
+                continue
+            hit = _actual_hit(a)          # 按当前阈值重算, 兼容旧记录
+            if hit is None:
+                continue                  # 开盘数据缺失
+            sc = s.get("score")
+            if sc is None:
+                # 兼容旧记录: 从已保存的 prob 反推 score(用当时的 gu_sig)
+                p = s.get("prob")
+                if not p or not (0 < p < 100):
+                    continue
+                try:
+                    sc = FCONFIG["gu_sig"] * math.log(p / (100.0 - p))
+                except Exception:
+                    continue
+            samples.append((float(sc), 1.0 if hit else 0.0))
+    n = len(samples)
+    if n < GAPUP_MIN_CALIB_SAMPLES:
+        return {"ok": False, "reason": f"样本不足({n}/{GAPUP_MIN_CALIB_SAMPLES}), 保持不校准", "n": n}
+    A = 1.0 / max(0.1, FCONFIG.get("gu_sig", 3.0))
+    actual_rate = sum(y for _, y in samples) / n
+    if actual_rate <= 0.0 or actual_rate >= 1.0:
+        return {"ok": False, "reason": f"样本单一(发生率{actual_rate:.2f}), 无法校准", "n": n}
+
+    def _mean_pred(B):
+        tot = 0.0
+        for sc, _ in samples:
+            z = max(-60.0, min(60.0, A * sc + B))
+            tot += 1 / (1 + math.exp(-z))   # sigmoid: 与 gap_up_score 同向
+        return tot / n
+
+    # B 增大 -> 预测均值增大, 单调, 用二分法求使均值=actual_rate 的 B
+    lo, hi = -30.0, 30.0
+    if _mean_pred(lo) > actual_rate:
+        B = lo
+    elif _mean_pred(hi) < actual_rate:
+        B = hi
+    else:
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if _mean_pred(mid) < actual_rate:
+                lo = mid
+            else:
+                hi = mid
+        B = (lo + hi) / 2.0
+    _GAPUP_CALIB.update({"A": round(A, 6), "B": round(B, 6), "n": n,
+                         "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")})
+    try:
+        tmp = GAPUP_CALIB + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_GAPUP_CALIB, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, GAPUP_CALIB)
+    except Exception as e:
+        print("[calib] 写入失败:", e, flush=True)
+    return {"ok": True, "A": round(A, 6), "B": round(B, 6), "n": n,
+            "pred_mean": round(_mean_pred(B) * 100, 2),
+            "actual_rate": round(actual_rate, 4),
+            "note": f"固定A={A:.3f}, 二分法求B={B:.3f}, 使预测均值≈实际发生率"}
+
+
+def gap_up_raw_score(d, ctx=None, late_pull=0.0):
+    """v3.10: 返回原始线性分数 score(未经 sigmoid), 供概率校准(Platt scaling)使用。
+    与 gap_up_score 共用同一套打分逻辑, 保证校准时用的分数与出推荐的分数一致。"""
     W = {**FCONFIG, **(GAPUP_WEIGHT_OVERRIDE or {})}  # 覆盖权重合并到默认, 保证键齐全
     if d["price"] <= 0 or d["high"] <= d["low"]:
-        return 0.0
+        return None
     rng = d["high"] - d["low"]
     range_pos = (d["price"] - d["low"]) / rng if rng > 0 else 0.5
     pct = d["pct"]
@@ -1974,7 +2185,19 @@ def gap_up_score(d, ctx=None, late_pull=0.0):
         score += (range_pos - 0.5) * min(late_pull, 2.0) * 0.8
     if d["amplitude"] > 12:                               # 振幅过大疑似冲高回落
         score -= (d["amplitude"] - 12) * 0.05
-    return round(1 / (1 + math.exp(-score / W["gu_sig"])) * 100, 1)
+    return score
+
+
+def gap_up_score(d, ctx=None, late_pull=0.0):
+    """启发式: 下个交易日开盘高开概率(0-100)。v2.8加入 尾盘拉升/宽度/小盘/大盘尾盘动向。
+    v3.4: 支持权重覆盖(_GAPUP_WEIGHT_OVERRIDE), 供调优时临时替换 gu_* 权重。
+    v3.10: 内部复用 gap_up_raw_score, 并应用 Platt scaling 校准(若已拟合)。"""
+    W = {**FCONFIG, **(GAPUP_WEIGHT_OVERRIDE or {})}  # 覆盖权重合并到默认, 保证键齐全
+    s = gap_up_raw_score(d, ctx, late_pull)
+    if s is None:
+        return 0.0
+    p = 1 / (1 + math.exp(-s / W["gu_sig"])) * 100
+    return round(_apply_gapup_calib(s, p), 1)
 
 
 _GAPUP_BUILDING = False
@@ -2025,6 +2248,8 @@ def _build_gapup_worker(force=False):
                           "turnover": d["turnover"], "amplitude": d["amplitude"],
                           "close_pos": round(close_pos, 3),
                           "late_pull": 0.0,
+                          # v3.10: 保存原始线性分数(供概率校准); None 表示数据无效
+                          "score": gap_up_raw_score(d, ctx, late_pull=0.0),
                           "prob": prob, "model": "启发式"})
         cands.sort(key=lambda x: x["prob"], reverse=True)
         top = cands[:15]
@@ -2044,6 +2269,10 @@ def _build_gapup_worker(force=False):
                        "pct": c["pct"], "weibi": c["weibi"], "volratio": c["volratio"],
                        "turnover": c["turnover"], "amplitude": c["amplitude"]}
             c["prob"] = gap_up_score(d_dummy, ctx, late_pull=lp)
+            # v3.10: 同步更新分数, 与最终 prob 对应(校准时用同一份 score)
+            _s = gap_up_raw_score(d_dummy, ctx, late_pull=lp)
+            if _s is not None:
+                c["score"] = _s
         top.sort(key=lambda x: x["prob"], reverse=True)
         print(f"[gapup] refine (heuristic + optional remote AI)...", flush=True)
         # AI 精修: 本地1.5B模型在沙箱CPU推理不稳定(会卡死), 故只尝试远程AI(timeout兜底), 失败回退启发式
@@ -2103,6 +2332,8 @@ def _build_gapup_worker(force=False):
             "stocks": [{
                 "code": c["code"], "name": c["name"], "prob": c["prob"],
                 "pct": c["pct"], "late_pull": c.get("late_pull", 0),
+                # v3.10: 记录原始线性分数, 供 Platt scaling 概率校准使用
+                "score": c.get("score"),
                 "features": {
                     "range_pos": c.get("close_pos", 0.5), "pct": c["pct"],
                     "weibi": c.get("weibi", 0), "volratio": c.get("volratio", 1),
@@ -2201,6 +2432,24 @@ def _load_gapup_log():
     return recs
 
 
+def _actual_hit(a):
+    """v3.10: 按当前阈值 GAPUP_MIN_GAP_PCT 重新判定"严格命中"。
+    历史记录的 is_gap_up 是按旧阈值(>0)存的, 改阈值后需重算才能保持口径一致。
+    返回 True/False, 或 None(开盘数据缺失, 不计入分母)。"""
+    gp = a.get("gap_pct")
+    if gp is None:
+        return None
+    return gp >= GAPUP_MIN_GAP_PCT
+
+
+def _actual_any(a):
+    """宽松命中: 开盘价 > 昨收(即 gap>0), 含噪声级微幅高开, 仅作对照。"""
+    gp = a.get("gap_pct")
+    if gp is None:
+        return None
+    return gp > 0
+
+
 def _find_verify_target(target_date=None):
     """返回待回测记录(dict)或 None。优先 target_date; 否则最近一个「上一交易日及更早」未验证且有 stocks 的记录。
     注: 仅回测 date < 今天 的记录, 保证「今日推荐 → 下一交易日开盘验证」的语义, 避免当天误回测。"""
@@ -2246,6 +2495,8 @@ def _accumulate_stats(rec=None):
     old = _load_stats()
     stats = {"total": 0, "gap_up": 0, "hit_rate": 0.0, "rank_hits": {},
              "avg_pred": 0.0, "avg_actual": 0.0, "recent": [],
+             # v3.10: 双命中率。hit_rate=严格(高开>=GAPUP_MIN_GAP_PCT), hit_rate_any=宽松(>0)
+             "gap_any": 0, "hit_rate_any": 0.0,
              "optimizations": old.get("optimizations", [])}
     recs = _load_gapup_log()
     # 兜底: 若传入 rec 已验证但尚未落盘(理论上 _verify_gapup_open 已先写文件), 合并且不重复
@@ -2262,18 +2513,25 @@ def _accumulate_stats(rec=None):
             a = next((x for x in r.get("actual", []) if x.get("code") == s.get("code")), None)
             if not a:
                 continue
-            if a.get("is_gap_up") is None:
+            # v3.10: 按当前阈值重算命中(历史记录可能是旧阈值), None=开盘数据缺失跳过
+            hit = _actual_hit(a)
+            if hit is None:
                 continue  # 开盘数据缺失(抓取失败)不计入命中率分母, 避免拉低准确率
+            any_hit = _actual_any(a)
             stats["total"] += 1
-            if a.get("is_gap_up"):
+            if hit:
                 stats["gap_up"] += 1
+            if any_hit:
+                stats["gap_any"] += 1
             all_pred.append(s.get("prob", 0))
             all_act.append(a.get("gap_pct", 0) or 0)
             rank = i + 1
             rank_tot[rank] = rank_tot.get(rank, 0) + 1
-            if a.get("is_gap_up"):
+            if hit:
                 rank_hits[rank] = rank_hits.get(rank, 0) + 1
     stats["hit_rate"] = round(stats["gap_up"] / stats["total"], 4) if stats["total"] else 0.0
+    stats["hit_rate_any"] = round(stats["gap_any"] / stats["total"], 4) if stats["total"] else 0.0
+    stats["min_gap_pct"] = GAPUP_MIN_GAP_PCT
     if all_pred:
         stats["avg_pred"] = round(sum(all_pred) / len(all_pred), 2)
         stats["avg_actual"] = round(sum(all_act) / len(all_act), 2)
@@ -2327,9 +2585,13 @@ def _verify_gapup_open(target_date=None):
             prev, op = d["prevclose"], d["open"]
             if prev and prev > 0 and op > 0:
                 gap = (op - prev) / prev * 100
+                # v3.10: 命中判定改为"有意义的高开"(默认 gap>=0.5%), 原为 op>prev 导致
+                # +0.01% 的噪声级波动也算命中, 虚增命中率。严格判定用于主指标,
+                # 同时保留 is_gap_any(>0) 以便对照展示宽松命中率。
                 actual.append({"code": s["code"], "name": s["name"], "open": round(op, 2),
                                "prevclose": round(prev, 2), "gap_pct": round(gap, 2),
-                               "is_gap_up": op > prev})
+                               "is_gap_up": gap >= GAPUP_MIN_GAP_PCT,
+                               "is_gap_any": op > prev})
             else:
                 actual.append({"code": s["code"], "name": s["name"], "open": op,
                                "prevclose": prev, "gap_pct": None, "is_gap_up": None})
@@ -2349,6 +2611,16 @@ def _verify_gapup_open(target_date=None):
         print(f"[gapup-verify] {rec.get('date')} 验证完成: 高开 {ng}/{len(actual)}", flush=True)
         if stats.get("total", 0) >= GAPUP_MIN_OPT_SAMPLES:
             optimize_gapup_weights()
+        # v3.10: 每验证一条就重拟合概率校准, 让概率随样本积累自动收敛到真实水平
+        try:
+            cb = fit_gapup_calib()
+            if cb.get("ok"):
+                print(f"[gapup-calib] A={cb['A']} B={cb['B']} n={cb['n']} "
+                      f"预测均值={cb['pred_mean']}% 实际={cb['actual_rate']*100:.1f}%", flush=True)
+            else:
+                print(f"[gapup-calib] 跳过: {cb.get('reason')}", flush=True)
+        except Exception:
+            traceback.print_exc()
         return rec
     except Exception:
         traceback.print_exc()
@@ -2486,6 +2758,536 @@ def detect_alerts(snap):
     return out
 
 
+# ---------------- v3.10: 通用预测回测闭环 (P1) ----------------
+# 问题: 除"尾盘高开潜力"外, 其余预测模块(上证1小时/尾盘大盘次日/尾盘个股次日/盘前涨停)
+# 全部只出预测、从不回收真实结果 —— 没有命中率, 概率是否可信无从验证, 更无法校准。
+# 方案: 统一落盘 pred_log.jsonl, 到期自动抓真实行情回填, 按模块累计:
+#   - 命中率 hit_rate(方向是否判对)
+#   - 校准偏差 bias = 平均预测概率 - 实际发生率(衡量概率是否名副其实)
+# 统一落盘后, 后续 Platt 校准可直接复用 gapup 的同款做法推广到各模块。
+
+PRED_MODULES = {
+    "idx_1h":          {"label": "上证1小时方向", "horizon": "1h",        "flat": 0.15},
+    "close_market":    {"label": "尾盘大盘次日", "horizon": "next_day",   "flat": 0.30},
+    "close_stock":     {"label": "尾盘个股次日", "horizon": "next_day",   "flat": 0.50},
+    "preopen_limitup": {"label": "盘前涨停预测", "horizon": "today_close", "flat": 0.0},
+}
+IDX_PRED_LOG_SEC = 900          # 上证预测每5秒刷新, 落盘记录按15分钟节流, 避免日志爆炸
+LIMITUP_HIT_PCT = 9.8           # 主板涨停判定(留0.2pp容差, 覆盖价格舍入)
+
+
+def _load_pred_log():
+    out = []
+    if not os.path.exists(PRED_LOG):
+        return out
+    try:
+        with open(PRED_LOG, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
+
+
+def _save_pred_log(recs):
+    tmp = PRED_LOG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for r in recs:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, PRED_LOG)
+
+
+def _add_trading_minutes(t, mins):
+    """在交易时间内推进 N 个交易分钟, 自动跳过午休(11:30-13:00), 超过15:00截断到15:00。
+    用于计算"1小时后"的真实到期时刻 —— 直接加60分钟会落进午休或收盘后, 抓不到有效价格。"""
+    day = t.date()
+    cur = datetime.datetime.combine(day, t.time())
+    end = datetime.datetime.combine(day, datetime.time(15, 0))
+    lunch_s = datetime.datetime.combine(day, datetime.time(11, 30))
+    lunch_e = datetime.datetime.combine(day, datetime.time(13, 0))
+    left = float(mins)
+    guard = 0
+    while left > 0 and guard < 20:
+        guard += 1
+        if lunch_s <= cur < lunch_e:
+            cur = lunch_e
+            continue
+        if cur >= end:
+            cur = end
+            break
+        nxt = lunch_s if cur < lunch_s else end
+        avail = (nxt - cur).total_seconds() / 60.0
+        if avail <= 0:
+            cur = nxt
+            continue
+        step = min(left, avail)
+        cur += datetime.timedelta(minutes=step)
+        left -= step
+    return cur.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _next_trading_day(t):
+    """返回下一个工作日(交易日)的 datetime(仅跳过周末, 法定节假日由回测时顺延)。"""
+    d = t + datetime.timedelta(days=1)
+    while d.weekday() >= 5:
+        d += datetime.timedelta(days=1)
+    return d
+
+
+def log_prediction(module, pred, verify_at, items=None):
+    """落盘一条待回测预测。同模块+同到期时刻+同key只保留一条(幂等, 防重复刷新写爆日志)。"""
+    if module not in PRED_MODULES:
+        return None
+    now = beijing_now()
+    key = str(pred.get("key") or pred.get("verdict") or "")
+    rec = {
+        "id": f"{module}_{now.strftime('%Y%m%d%H%M%S')}_{abs(hash(key)) % 100000}",
+        "module": module, "date": now.strftime("%Y-%m-%d"),
+        "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "verify_at": verify_at, "verified": False,
+        "key": key, "pred": pred, "actual": None,
+    }
+    try:
+        recs = _load_pred_log()
+        for r in recs:
+            if (r.get("module") == module and r.get("key") == key
+                    and r.get("verify_at") == verify_at):
+                return None          # 已记录, 跳过
+        recs.append(rec)
+        # 日志体积保护: 超过 3000 条时丢弃已验证的最旧记录
+        if len(recs) > 3000:
+            keep, dropped = [], 0
+            for r in recs:
+                if len(recs) - dropped <= 3000 or not r.get("verified"):
+                    keep.append(r)
+                else:
+                    dropped += 1
+            recs = keep
+        _save_pred_log(recs)
+        return rec["id"]
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _verdict_hit(verdict, ret, flat_band):
+    """方向命中判定: 多/空看符号, 震荡看是否落在阈值带内。"""
+    if verdict in ("看涨", "偏多"):
+        return ret > 0
+    if verdict in ("看跌", "偏空"):
+        return ret < 0
+    return abs(ret) <= flat_band
+
+
+def _kline_bars_range(code, start, end, n=20):
+    """按显式日期区间抓日线(前复权), 供回测按日期回溯 —— 与验证执行时刻无关,
+    即使沙箱休眠跨天后才回测, 也不会拿错基准收盘价。失败返回 []。"""
+    mkt = _market_prefix(code) + code
+    try:
+        url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+               f"?param={mkt},day,{start},{end},{n},qfq")
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        node = (r.json().get("data") or {}).get(mkt) or {}
+        bars = node.get("qfqday") or node.get("day") or []
+        out = []
+        for b in bars:
+            try:
+                out.append({"date": b[0], "open": float(b[1]), "close": float(b[2]),
+                            "high": float(b[3]), "low": float(b[4])})
+            except (ValueError, IndexError, TypeError):
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _next_day_return(code, pred_date):
+    """取 pred_date 次一交易日的涨跌幅(次日收盘 vs pred_date收盘)。"""
+    try:
+        end = (datetime.datetime.strptime(pred_date, "%Y-%m-%d")
+               + datetime.timedelta(days=12)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+    bars = _kline_bars_range(code, pred_date, end)
+    for i, b in enumerate(bars):
+        if b["date"] == pred_date and i + 1 < len(bars):
+            base, nxt = b["close"], bars[i + 1]
+            if base > 0:
+                return {"ret": round((nxt["close"] - base) / base * 100, 3),
+                        "price": nxt["close"], "date": nxt["date"]}
+    return None
+
+
+def _day_pct(code, date):
+    """取 date 当日涨跌幅(相对其前一根K线收盘), 用于涨停判定, 与执行时刻无关。"""
+    try:
+        start = (datetime.datetime.strptime(date, "%Y-%m-%d")
+                 - datetime.timedelta(days=20)).strftime("%Y-%m-%d")
+        end = (datetime.datetime.strptime(date, "%Y-%m-%d")
+               + datetime.timedelta(days=2)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+    bars = _kline_bars_range(code, start, end)
+    for i, b in enumerate(bars):
+        if b["date"] == date and i >= 1 and bars[i - 1]["close"] > 0:
+            prev = bars[i - 1]["close"]
+            return {"ret": round((b["close"] - prev) / prev * 100, 3),
+                    "price": b["close"], "date": b["date"]}
+    return None
+
+
+# --- 本地日线库版回测数据源(数据由每日15:05采集落库) ---
+def _next_day_return_local(code, pred_date):
+    bars = [r for r in _load_daily() if (r.get("bars") or {}).get(code)]
+    for i, b in enumerate(bars):
+        if b["date"] == pred_date and i + 1 < len(bars):
+            base = b["bars"][code]["c"]
+            c1 = bars[i + 1]["bars"][code]["c"]
+            if base and base > 0 and c1:
+                return {"ret": round((c1 - base) / base * 100, 3), "price": c1,
+                        "date": bars[i + 1]["date"], "src": "local"}
+    return None
+
+
+def _day_pct_local(code, date):
+    bars = [r for r in _load_daily() if (r.get("bars") or {}).get(code)]
+    for i, b in enumerate(bars):
+        if b["date"] == date and i >= 1:
+            prev = bars[i - 1]["bars"][code]["c"]
+            c = b["bars"][code]["c"]
+            if prev and prev > 0 and c:
+                return {"ret": round((c - prev) / prev * 100, 3), "price": c,
+                        "date": date, "src": "local"}
+    return None
+
+
+# --- 实时行情兜底(仅在能证明基准对齐时采信) ---
+def _live_next_day_return(code, rec):
+    """实时行情算次一交易日涨跌。仅当行情的昨收 ≈ 预测时记录的基准价(预测日14:50价≈收盘)
+    时才采信 —— 说明当前正是次一交易日; 若已漂移到更晚, 昨收会变, 返回None留待日线源。"""
+    base = (rec.get("pred") or {}).get("base_close")
+    if not base:
+        return None
+    q = fetch_tencent([code])
+    d = parse_row(q.get(code.upper(), []))
+    if not d["price"] or not d["prevclose"] or d["prevclose"] <= 0:
+        return None
+    if abs(d["prevclose"] - base) / base > 0.006:   # 基准对不上 => 已跨多个交易日
+        return None
+    return {"ret": d["pct"] or 0.0, "price": d["price"],
+            "date": rec.get("date"), "src": "live"}
+
+
+def _live_day_pct(code, rec):
+    """实时行情算预测当日涨跌, 仅限预测当日(收盘后pct即当日涨跌幅)。"""
+    if rec.get("date") != beijing_now().strftime("%Y-%m-%d"):
+        return None
+    q = fetch_tencent([code])
+    d = parse_row(q.get(code.upper(), []))
+    if not d["price"]:
+        return None
+    return {"ret": d["pct"] or 0.0, "price": d["price"],
+            "date": rec.get("date"), "src": "live"}
+
+
+def _verify_one_pred(rec):
+    """抓真实结果回填一条预测。返回 True 表示已回填(无论命中与否)。"""
+    module, now = rec.get("module"), beijing_now()
+    pred = rec.get("pred") or {}
+    today_s = now.strftime("%Y-%m-%d")
+    if module == "idx_1h":
+        # 1小时后的价格是盘中瞬时值, 只能当日回填; 跨天未回填则记为过期(无法补抓)
+        if rec.get("date") != today_s and now.time() > datetime.time(9, 25):
+            rec["actual"] = {"expired": True, "hit": None}
+            rec["verified"] = True
+            rec["verified_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            return True
+        q = fetch_tencent(["sh000001"])
+        d = parse_row(q.get("SH000001", []))
+        p0, p1 = pred.get("price"), d["price"]
+        if not p0 or not p1:
+            return False
+        ret = (p1 - p0) / p0 * 100
+        hit = _verdict_hit(pred.get("verdict"), ret, PRED_MODULES[module]["flat"])
+        rec["actual"] = {"price": round(p1, 2), "ret": round(ret, 3), "hit": bool(hit)}
+    elif module in ("close_market", "close_stock"):
+        code = pred.get("qcode")
+        if not code:
+            return False
+        # 三级数据源, 避免单一接口故障导致回测停摆:
+        # 1) 本地日线库(每日15:05自采) 2) 腾讯在线日线(按预测日期回溯, 防休眠跨天拿错基准)
+        # 3) 实时行情兜底(仅当行情昨收≈预测日基准, 证明今天就是次一交易日时才采信)
+        a = _next_day_return_local(code, rec.get("date") or today_s) \
+            or _next_day_return(code, rec.get("date") or today_s) \
+            or _live_next_day_return(code, rec)
+        if not a:
+            return False            # 次一交易日K线尚未生成(未收盘), 留待下次
+        hit = _verdict_hit(pred.get("verdict"), a["ret"], PRED_MODULES[module]["flat"])
+        rec["actual"] = {"price": a["price"], "ret": a["ret"], "hit": bool(hit),
+                         "actual_date": a.get("date"), "src": a.get("src", "kline")}
+    elif module == "preopen_limitup":
+        code = pred.get("qcode")
+        if not code:
+            return False
+        # 同样三级数据源: 本地日线库 -> 在线日线 -> 实时行情(仅限预测当日收盘后)
+        a = _day_pct_local(code, rec.get("date") or today_s) \
+            or _day_pct(code, rec.get("date") or today_s) \
+            or _live_day_pct(code, rec)
+        if not a:
+            return False            # 当日K线尚未生成(未收盘), 留待下次
+        hit = a["ret"] >= LIMITUP_HIT_PCT
+        rec["actual"] = {"price": a["price"], "ret": a["ret"], "hit": bool(hit),
+                         "actual_date": a.get("date"), "src": a.get("src", "kline")}
+    else:
+        return False
+    rec["verified"] = True
+    rec["verified_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    return True
+
+
+def verify_predictions():
+    """扫描待回测记录: 已到期的抓真实结果回填, 然后重算统计。"""
+    try:
+        now = beijing_now()
+        now_s = now.strftime("%Y-%m-%d %H:%M:%S")
+        recs = _load_pred_log()
+        changed, done = False, 0
+        for r in recs:
+            if r.get("verified"):
+                continue
+            va = r.get("verify_at")
+            if not va or va > now_s:
+                continue
+            try:
+                if _verify_one_pred(r):
+                    changed = True
+                    done += 1
+            except Exception:
+                traceback.print_exc()
+        if changed:
+            _save_pred_log(recs)
+            _recompute_pred_stats()
+        if done:
+            print(f"[pred-verify] 回填 {done} 条预测结果", flush=True)
+        return done
+    except Exception:
+        traceback.print_exc()
+        return 0
+
+
+def _recompute_pred_stats():
+    """按模块累计: 样本数/命中率/平均预测概率/校准偏差/分方向明细/最近明细。"""
+    stats = {"updated_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S"), "modules": {}}
+    buckets = {m: [] for m in PRED_MODULES}
+    for r in _load_pred_log():
+        if not (r.get("verified") and r.get("actual")):
+            continue
+        m = r.get("module")
+        if m in buckets:
+            buckets[m].append(r)
+    for m, rows in buckets.items():
+        n = len(rows)
+        ent = {"label": PRED_MODULES[m]["label"], "n": n, "hit": 0,
+               "hit_rate": None, "avg_pred": None, "avg_ret": None,
+               "bias_pp": None, "by_verdict": {}, "recent": []}
+        if n:
+            hits = sum(1 for r in rows if r["actual"].get("hit"))
+            preds = [r["pred"].get("prob") for r in rows
+                     if isinstance(r["pred"].get("prob"), (int, float))]
+            rets = [r["actual"].get("ret") for r in rows
+                    if isinstance(r["actual"].get("ret"), (int, float))]
+            ent["hit"] = hits
+            ent["hit_rate"] = round(hits / n, 4)
+            if preds:
+                mp = sum(preds) / len(preds)
+                ent["avg_pred"] = round(mp, 2)
+                # 校准偏差: 平均宣称概率 - 实际命中率。>0 表示系统性高估(过度自信)
+                ent["bias_pp"] = round(mp - hits / n * 100, 2)
+            if rets:
+                ent["avg_ret"] = round(sum(rets) / len(rets), 3)
+            bv = {}
+            for r in rows:
+                v = r["pred"].get("verdict") or "-"
+                b = bv.setdefault(v, {"n": 0, "hit": 0})
+                b["n"] += 1
+                b["hit"] += 1 if r["actual"].get("hit") else 0
+            ent["by_verdict"] = {k: {"n": v["n"], "hit": v["hit"],
+                                     "rate": round(v["hit"] / v["n"], 4) if v["n"] else None}
+                                 for k, v in bv.items()}
+            rows_sorted = sorted(rows, key=lambda x: x.get("verified_at", ""), reverse=True)
+            ent["recent"] = [{"date": r.get("date"), "key": r.get("key"),
+                              "verdict": r["pred"].get("verdict"),
+                              "prob": r["pred"].get("prob"),
+                              "ret": r["actual"].get("ret"),
+                              "hit": r["actual"].get("hit")} for r in rows_sorted[:12]]
+        stats["modules"][m] = ent
+    try:
+        tmp = PRED_STATS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, PRED_STATS)
+    except Exception:
+        pass
+    return stats
+
+
+def load_pred_stats():
+    if os.path.exists(PRED_STATS):
+        try:
+            return json.load(open(PRED_STATS, encoding="utf-8"))
+        except Exception:
+            pass
+    return _recompute_pred_stats()
+
+
+# ---------------- v3.10: 本地日线库 (P2) ----------------
+# 问题: 此前所有历史K线都靠实时调 _fetch_kline 现抓, 既慢又无本地沉淀,
+#       导致"回测/统计/连板基因"等依赖历史的逻辑永远只能看最近 12 天, 且无法验证。
+# 方案: 每个交易日收盘后(15:05)把当日完整日线(OHLCV)落盘 daily_bars.jsonl,
+#       并按"保留天数 + 体积上限"双重阈值定期清理, 防止长期运行把磁盘写满。
+# 格式: 每行一天 {"date":"2026-08-30","ts":"...","bars":{"sh000001":{"o":..,"h":..,"l":..,"c":..,"v":..}}}
+
+def _daily_universe():
+    """日线库收录范围: 指数 + 持仓 + 自选 + 当日涨停候选 + 尾盘高开推荐。
+    DAILY_UNIVERSE_LIMIT>0 时截断(0=不限制)。"""
+    codes = [c for c, _ in INDICES]
+    try:
+        codes += [(h["market"] + h["code"]).lower() for h in HOLDINGS]
+    except Exception:
+        pass
+    try:
+        codes += [(w["market"] + w["code"]).lower() for w in WATCHLIST]
+    except Exception:
+        pass
+    try:
+        for c in (_CAND_POOL or [])[:30]:
+            codes.append(_market_prefix(c["code"]) + c["code"])
+    except Exception:
+        pass
+    try:
+        for c in (STATE.get("gapup") or {}).get("rows", [])[:10]:
+            codes.append(_market_prefix(c["code"]) + c["code"])
+    except Exception:
+        pass
+    codes = [c.lower() for c in codes if c]
+    codes = list(dict.fromkeys(codes))
+    if DAILY_UNIVERSE_LIMIT and len(codes) > DAILY_UNIVERSE_LIMIT:
+        codes = codes[:DAILY_UNIVERSE_LIMIT]
+    return codes
+
+
+def _load_daily():
+    out = []
+    if not os.path.exists(DAILY_BARS):
+        return out
+    try:
+        with open(DAILY_BARS, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    out.sort(key=lambda r: r.get("date", ""))
+    return out
+
+
+def _daily_size_mb(recs):
+    return sum(len(json.dumps(r, ensure_ascii=False)) + 1 for r in recs) / 1024.0 / 1024.0
+
+
+def capture_daily_bars():
+    """收盘后抓取当日完整日线落库, 并顺带执行定期清理(保留天数/体积上限双阈值)。"""
+    try:
+        now = beijing_now()
+        today = now.strftime("%Y-%m-%d")
+        codes = _daily_universe()
+        if not codes:
+            return {"ok": False, "reason": "无收录标的"}
+        ymd = now.strftime("%Y%m%d")
+        bars, got, stale = {}, 0, 0
+        for i in range(0, len(codes), 40):
+            q = fetch_tencent(codes[i:i + 40])
+            for k, row in q.items():
+                # 关键: 校验行情日期。休市/节假日时腾讯仍返回上一交易日的收盘数据,
+                # 若不校验就会把上一交易日的K线错记成今天的, 日线库从此失真。
+                qday = str(row[30])[:8] if len(row) > 30 else ""
+                if qday and qday != ymd:
+                    stale += 1
+                    continue
+                d = parse_row(row)
+                if not d.get("price") or d["price"] <= 0:
+                    continue
+                bars[k.lower()] = {"o": d["open"], "h": d["high"], "l": d["low"],
+                                   "c": d["price"], "v": d.get("vol", 0),
+                                   "amt": d.get("amount_wan", 0)}
+                got += 1
+        if not bars:
+            return {"ok": False, "reason": f"无当日行情(可能休市, 过期行情{stale}只)"}
+        recs = [r for r in _load_daily() if r.get("date") != today]
+        recs.append({"date": today, "ts": now.strftime("%Y-%m-%d %H:%M:%S"), "bars": bars})
+        recs.sort(key=lambda r: r.get("date", ""))
+        # --- 定期清理: 先按保留天数, 再按体积上限 ---
+        note = []
+        if len(recs) > DAILY_KEEP_DAYS:
+            drop = len(recs) - DAILY_KEEP_DAYS
+            recs = recs[drop:]
+            note.append(f"超保留天数({DAILY_KEEP_DAYS}天), 丢弃最旧{drop}天")
+        guard = 0
+        while _daily_size_mb(recs) > DAILY_MAX_MB and len(recs) > 30 and guard < 500:
+            recs = recs[1:]
+            guard += 1
+        if guard:
+            note.append(f"超体积上限({DAILY_MAX_MB}MB), 再丢弃最旧{guard}天")
+        tmp = DAILY_BARS + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for r in recs:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, DAILY_BARS)
+        print(f"[daily-bars] {today} 落库 {got}只(跳过过期{stale}只), 累计 {len(recs)}天, "
+              f"{_daily_size_mb(recs):.2f}MB" + (f" | 清理: {'; '.join(note)}" if note else ""),
+              flush=True)
+        return {"ok": True, "date": today, "codes": got, "stale_skipped": stale,
+                "days": len(recs), "size_mb": round(_daily_size_mb(recs), 3), "cleaned": note}
+    except Exception:
+        traceback.print_exc()
+        return {"ok": False, "reason": "异常", "trace": traceback.format_exc()}
+
+
+def daily_bars_info():
+    recs = _load_daily()
+    if not recs:
+        return {"days": 0, "codes": 0, "size_mb": 0, "from": None, "to": None}
+    return {"days": len(recs), "codes": len(recs[-1].get("bars", {})),
+            "size_mb": round(_daily_size_mb(recs), 3),
+            "from": recs[0].get("date"), "to": recs[-1].get("date"),
+            "keep_days": DAILY_KEEP_DAYS, "max_mb": DAILY_MAX_MB}
+
+
+def get_daily_bars(code, days=60):
+    """从本地日线库取某标的最近 N 天日线(升序)。本地没有时回退到在线 _fetch_kline。"""
+    key = code.lower()
+    if not key.startswith(("sh", "sz")):
+        key = _market_prefix(code) + code
+    out = []
+    for r in _load_daily()[-days:]:
+        b = (r.get("bars") or {}).get(key)
+        if b:
+            out.append({"date": r["date"], "open": b.get("o"), "close": b.get("c"),
+                        "high": b.get("h"), "low": b.get("l"), "vol": b.get("v")})
+    return out
+
+
 # 休眠窗口策略(用户授权): 每日 16:00–次日 09:00 允许沙箱平台自动休眠以省资源。
 # 唤醒由平台在收到用户新指令时自动完成(无需额外操作)。本调度器在非交易时段不主动
 # 保持连接/不做重活(各预测模块仅在交易时段触发), 不会阻止平台休眠。
@@ -2513,10 +3315,11 @@ def scheduler_loop():
                 STATE["latest"] = snap
                 STATE["last_update"] = now
 
-                # 指数1小时预测: 每2分钟(异步 worker + AI 融合, 不阻塞调度循环)
+                # 指数1小时预测: v3.10 改为每 IDX_FORECAST_SEC(5秒) 刷新
+                # (异步 worker, 不阻塞调度循环; AI融合在worker内按 IDX_AI_FUSE_SEC 降频)
                 if now.time() >= datetime.time(9, 15):
                     last = STATE["idx_forecast_time"]
-                    if not last or (now - last).total_seconds() >= 120:
+                    if not last or (now - last).total_seconds() >= IDX_FORECAST_SEC:
                         STATE["idx_forecast_time"] = now
                         _start_idx_build()
 
@@ -2562,6 +3365,17 @@ def scheduler_loop():
                 if now.time() >= datetime.time(9, 30) and STATE.get("gapup_verify_date") != today:
                     STATE["gapup_verify_date"] = today
                     threading.Thread(target=_verify_gapup_open, daemon=True).start()
+
+                # v3.10 P1: 通用预测回测 —— 到期的预测抓真实结果回填(每10分钟一次)
+                last_pv = STATE.get("pred_verify_time")
+                if last_pv is None or (now - last_pv).total_seconds() >= 600:
+                    STATE["pred_verify_time"] = now
+                    threading.Thread(target=verify_predictions, daemon=True).start()
+
+                # v3.10 P2: 收盘后(15:05)抓取当日完整日线落库 + 定期清理(每天一次)
+                if now.time() >= datetime.time(15, 5) and STATE.get("daily_bars_date") != today:
+                    STATE["daily_bars_date"] = today
+                    threading.Thread(target=capture_daily_bars, daemon=True).start()
 
             if trading:
                 time.sleep(POLL)
@@ -2649,6 +3463,35 @@ def api_idx():
         cur = STATE["idx_forecast"]
     return jsonify(cur if cur else {"building": True,
                                     "note": "上证预测计算中(含AI模型融合), 请稍候自动更新…"})
+
+
+@app.route("/api/pred_stats")
+def api_pred_stats():
+    """v3.10: 各预测模块的命中率/校准偏差回测统计。?refresh=1 强制重算。"""
+    if request.args.get("refresh") in ("1", "true"):
+        return jsonify(_recompute_pred_stats())
+    return jsonify(load_pred_stats())
+
+
+@app.route("/api/pred_verify")
+def api_pred_verify():
+    """手动触发一次预测回测回填(调试用)。"""
+    return jsonify({"done": verify_predictions(), "stats": load_pred_stats()})
+
+
+@app.route("/api/daily_bars")
+def api_daily_bars():
+    """v3.10: 本地日线库状态。?capture=1 手动触发当日落库; ?code=600522&days=60 取日线。"""
+    code = request.args.get("code")
+    if code:
+        try:
+            days = int(request.args.get("days", 60))
+        except ValueError:
+            days = 60
+        return jsonify({"code": code, "bars": get_daily_bars(code, days)})
+    if request.args.get("capture") in ("1", "true"):
+        return jsonify(capture_daily_bars())
+    return jsonify(daily_bars_info())
 
 
 @app.route("/api/drivers")
@@ -2979,6 +3822,11 @@ td:first-child,th:first-child{text-align:left}
     <span>📊 高开回测（推荐→开盘实测）</span>
   </div>
   <div class="card gv-card" id="gapverify"><div class="note">加载中…</div></div>
+  <!-- 7.2 预测回测总览(v3.10): 上证1小时/尾盘大盘/尾盘个股/盘前涨停 的命中率与校准偏差 -->
+  <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
+    <span>🎯 预测回测总览（各模块命中率 & 概率校准）</span>
+  </div>
+  <div class="card gv-card" id="predstats"><div class="note">加载中…</div></div>
   <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
   <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">__VERSION__</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
 </div>
@@ -3247,7 +4095,46 @@ function renderGapVerify(d){
   box.innerHTML=r;
 }
 
-function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});}
+// 预测回测总览(v3.10): 四个预测模块的命中率/平均预测概率/校准偏差 + 日线库状态
+const PRED_LABELS={idx_1h:'上证1小时方向',close_market:'尾盘大盘次日',close_stock:'尾盘个股次日',preopen_limitup:'盘前涨停预测'};
+function renderPredStats(s){
+  const box=document.getElementById('predstats');
+  if(!box) return;
+  const mods=(s&&s.modules)||{};
+  const keys=Object.keys(PRED_LABELS).filter(k=>mods[k]);
+  if(!keys.length){
+    box.innerHTML='<div class="note">暂无回测样本。预测落盘后按到期时刻自动回填真实结果（上证1小时当日验证，尾盘/涨停次日或当日收盘验证），样本会随交易日积累。</div>';
+    return;
+  }
+  let r='<div class="gv-list">';
+  keys.forEach(k=>{
+    const e=mods[k];
+    const rate=e.hit_rate==null?null:e.hit_rate*100;
+    const bias=e.bias_pp;
+    const biasTxt=bias==null?'--':(bias>1?'高估'+fmt(bias,1)+'pp':bias<-1?'低估'+fmt(-bias,1)+'pp':'贴合±1pp');
+    const biasCls=bias==null?'flat':(Math.abs(bias)<=1?'flat':(bias>0?'down':'up')); // 高估=橙红提示, 低估=偏绿
+    r+=`<div class="gv-item">`
+      +`<span class="gv-name">${PRED_LABELS[k]}</span>`
+      +`<span class="gv-prob flat">样本${e.n}</span>`
+      +`<span class="gv-gap ${rate==null?'flat':(rate>=50?'up':'down')}">命中率 ${rate==null?'--':fmt(rate,0)+'%'}</span>`
+      +`<span class="gv-res ${biasCls}" style="min-width:96px;text-align:right;font-size:12px">偏差 ${biasTxt}</span>`
+      +`</div>`;
+    // 分方向明细(紧凑一行)
+    const bv=e.by_verdict||{};
+    const detail=Object.keys(bv).map(v=>{
+      const b=bv[v];
+      return `${v} ${b.hit}/${b.n}`;
+    }).join(' · ');
+    if(detail) r+=`<div class="gv-opt-row" style="padding-left:10px"><span class="gv-opt-date">${e.avg_pred!=null?'均预测 '+fmt(e.avg_pred,1)+'%':''}</span><span class="gv-opt-delta">${detail}</span></div>`;
+  });
+  r+='</div>';
+  // 校准说明: 偏差>0 表示模型宣称的概率系统性高于实际发生率(过度自信)
+  const anyBias=keys.some(k=>mods[k].bias_pp!=null&&Math.abs(mods[k].bias_pp)>5);
+  if(anyBias) r+='<div class="note" style="margin-top:6px">提示: 偏差为"平均预测概率 − 实际命中率"。偏差>5pp 说明该模块概率过度自信，样本≥12 后可启用概率校准自动修正。</div>';
+  box.innerHTML=r;
+}
+function loadPredStats(){fetch('/api/pred_stats').then(r=>r.json()).then(renderPredStats).catch(()=>{});}
+function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();}
 function manual(t){
   if(t==='close'){
     const b=document.getElementById('closeRefreshBtn');
