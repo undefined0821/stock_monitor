@@ -58,7 +58,7 @@ new = (
 assert old in html, "未找到脚本片段"
 html = html.replace(old, new)
 
-out = "/workspace/stock_monitor/dashboard_snapshot.html"
+out = f"{app.BASE}/dashboard_snapshot.html"
 with open(out, "w", encoding="utf-8") as f:
     f.write(html)
 print("已生成:", out, "大小", len(html))

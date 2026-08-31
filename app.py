@@ -14,7 +14,9 @@ from flask import Flask, Response, jsonify, request
 
 import requests
 
-BASE = "/workspace/stock_monitor"
+# BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
+_HERE = os.path.dirname(os.path.abspath(__file__))
+BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
 VERSION = "v3.11.1"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
@@ -4441,7 +4443,7 @@ td:first-child,th:first-child{text-align:left}
       <div id="sectors" style="max-height:300px;overflow:auto"></div>
       <div class="note" id="bias"></div>
     </div>
-    <div class="card" id="retailCard" style="border-color:var(--gold)"><h3>散户今日平均盈亏</h3><div id="retail"><div class="note">加载中…</div></div></div>
+    <div class="card" id="retailCard" style="border-color:var(--gold)"><h3>国证2000 小盘涨跌（散户代理）</h3><div id="retail"><div class="note">加载中…</div></div></div>
     <div class="card" id="driversCard"><h3>主题材拉/踩指数 <span class="code">每10分钟检测</span></h3><div id="drivers"><div class="note">加载中…</div></div>
       <button onclick="manual('drivers')" style="margin-top:8px;background:var(--blue);color:#06121f;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px">立即检测</button>
     </div>
@@ -4650,7 +4652,7 @@ function render(d){
   if(d.retail_pnl){const r=d.retail_pnl;const rc=cls(r.pct);
     rt.innerHTML=`<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
       <span class="pct ${rc}" style="font-size:20px;font-weight:700">${sign(r.pct)}%</span>
-      <span class="badge b-${r.pct>=0?'up':'down'}">散户平均${r.pct>=0?'盈利':'亏损'} ≈ ${sign(r.pct)}%</span>
+      <span class="badge b-${r.pct>=0?'up':'down'}">小盘(国证2000) ${r.pct>=0?'涨':'跌'} ≈ ${sign(r.pct)}%</span>
       <span class="note" style="margin:0">${r.name} ${fmt(r.price)}</span>
     </div>
     <div class="note">以国证2000(小盘股)当日涨跌幅近似散户平均盈亏, 仅供参考</div>`;
