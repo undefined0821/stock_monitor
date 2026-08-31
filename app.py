@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.2"
+VERSION = "v3.11.3"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -4304,7 +4304,7 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
 .tag.live{color:var(--up);border-color:var(--up);background:rgba(239,83,80,.08)}
 .wrap{max-width:1280px;margin:0 auto;padding:20px 18px 64px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:12px}
-.card{position:relative;overflow:hidden;background:var(--card);border:1px solid var(--line);border-radius:12px;
+.card{position:relative;overflow-x:auto;overflow-y:hidden;background:var(--card);border:1px solid var(--line);border-radius:12px;
   padding:12px 12px 11px;transition:transform .15s ease,box-shadow .15s ease,border-color .15s ease;box-shadow:0 1px 2px rgba(0,0,0,.18)}
 .card:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.30);border-color:#3d4756}
 .card::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line)}
@@ -4337,10 +4337,17 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
 .b-muted{background:var(--row-line);color:var(--mut)}
 .b-up{background:rgba(239,83,80,.18);color:var(--up)}
 .b-down{background:rgba(38,166,154,.18);color:var(--down)}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--row-line)}
-th{color:var(--mut);font-weight:500}
+table{width:100%;border-collapse:collapse;font-size:13px;table-layout:auto}
+th,td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--row-line);font-variant-numeric:tabular-nums}
+th{color:var(--mut);font-weight:500;white-space:nowrap}
 td:first-child,th:first-child{text-align:left}
+/* v3.11.3: 表格移动端适配(10列宽表如#gapup 在窄屏会被裁) */
+@media(max-width:600px){
+  table{font-size:11.5px}
+  th,td{padding:5px 6px;white-space:nowrap;max-width:7em;overflow:hidden;text-overflow:ellipsis}
+  th:nth-child(2),td:nth-child(2){max-width:none}    /* 代码列不截(纯数字) */
+  th:nth-child(3),td:nth-child(3){max-width:5em}     /* 名称列窄一些, 必要时省略 */
+}
 .bar{height:8px;border-radius:4px;background:var(--down);display:inline-block;vertical-align:middle}
 .bar.up{background:var(--up)}
 .feed{max-height:320px;overflow:auto}
