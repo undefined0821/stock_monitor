@@ -62,6 +62,7 @@ td:first-child,th:first-child{text-align:left}
   th,td{padding:5px 6px;white-space:nowrap;max-width:7em;overflow:hidden;text-overflow:ellipsis}
   th:nth-child(2),td:nth-child(2){max-width:none}
   th:nth-child(3),td:nth-child(3){max-width:5em}
+  .prob{font-size:15px}
 }
 .bar{height:8px;border-radius:4px;background:var(--down);display:inline-block;vertical-align:middle}
 .bar.up{background:var(--up)}
@@ -101,7 +102,7 @@ td:first-child,th:first-child{text-align:left}
 .gv-opt-auc{font-weight:600;font-variant-numeric:tabular-nums}
 .gv-opt-auc.up{color:var(--up)}.gv-opt-auc.down{color:var(--down)}
 .gv-opt-delta{color:var(--mut);font-variant-numeric:tabular-nums;opacity:.9}
-.prob{font-size:24px;font-weight:700}
+.prob{font-size:clamp(15px,4.5vw,24px);font-weight:700;line-height:1.15}
 .gauge{display:inline-block;font-size:22px;font-weight:700}
 .eye{cursor:pointer;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:16px;padding:4px 10px;line-height:1}
 .eye:hover{border-color:var(--blue)}

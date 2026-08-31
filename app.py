@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.4"
+VERSION = "v3.11.5"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -94,6 +94,10 @@ _FORECAST_DEFAULTS = {
     # 尾盘预测(大盘明日方向)
     "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
     "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
+    # 尾盘个股次日(close_stock, v3.11 参数化; 默认与旧硬编码一致, 行为不变)
+    "stk_sh_w": 1.5, "stk_cyb_w": 1.0, "stk_sec_w": 1.2, "stk_yin_w": 1.5,
+    "stk_amt_w": 0.5, "stk_posmag": 1.5, "stk_pnl_pos": 0.8, "stk_pnl_neg": 0.8,
+    "stk_breadth_w": 3.0, "stk_retail_w": 0.6, "stk_late_w": 1.2, "stk_sig": 5.0,
     # 尾盘高开潜力
     "gu_pos_w": 3.5, "gu_parab_w": 1.0, "gu_wb_w": 2.2, "gu_vr_w": 0.6,
     "gu_to_w": 0.12, "gu_latepull_w": 1.5, "gu_breadth_w": 3.0,
@@ -1649,6 +1653,7 @@ def _build_close_worker():
                                 f"→ 融合(AI权重{w}){m['prob']:.1f}%")
         # v3.10: 落盘待回测(大盘1条 + 每只持仓1条, 次日收盘后回填真实涨跌)
         # base_close 记录预测时的最新价(14:50≈收盘), 供实时行情兜底时校验基准对齐
+        ctx = _market_context(snap)   # v3.11.5: worker 作用域需显式计算 ctx(close_prediction 内部为局部变量)
         try:
             _now2 = beijing_now()
             nd = _next_trading_day(_now2)
@@ -4362,6 +4367,7 @@ td:first-child,th:first-child{text-align:left}
   th,td{padding:5px 6px;white-space:nowrap;max-width:7em;overflow:hidden;text-overflow:ellipsis}
   th:nth-child(2),td:nth-child(2){max-width:none}    /* 代码列不截(纯数字) */
   th:nth-child(3),td:nth-child(3){max-width:5em}     /* 名称列窄一些, 必要时省略 */
+  .prob{font-size:15px}                              /* v3.11.5: 概率数字随表格缩小, 不再溢出 */
 }
 .bar{height:8px;border-radius:4px;background:var(--down);display:inline-block;vertical-align:middle}
 .bar.up{background:var(--up)}
@@ -4401,7 +4407,7 @@ td:first-child,th:first-child{text-align:left}
 .gv-opt-auc{font-weight:600;font-variant-numeric:tabular-nums}
 .gv-opt-auc.up{color:var(--up)}.gv-opt-auc.down{color:var(--down)}
 .gv-opt-delta{color:var(--mut);font-variant-numeric:tabular-nums;opacity:.9}
-.prob{font-size:24px;font-weight:700}
+.prob{font-size:clamp(15px,4.5vw,24px);font-weight:700;line-height:1.15}
 .gauge{display:inline-block;font-size:22px;font-weight:700}
 .eye{cursor:pointer;background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:8px;font-size:16px;padding:4px 10px;line-height:1}
 .gv-toolbar .gv-btn{background:var(--blue,#2f80ed);color:#06121f;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600}
