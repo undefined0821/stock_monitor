@@ -38,10 +38,11 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
 .row .lbl{color:var(--mut)}
 .row:last-of-type{border-bottom:none}
 .row span:last-child{font-variant-numeric:tabular-nums;font-weight:500}
-.kpi{display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 18px}
-.kpi div{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 16px;min-width:118px;flex:1;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.kpi{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 18px}
+.kpi div{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-width:0;flex:1 1 104px;box-shadow:0 1px 2px rgba(0,0,0,.15);overflow:hidden}
 .kpi div{color:var(--mut);font-size:12px}
-.kpi b{display:block;font-size:22px;font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums;margin-top:2px}
+.kpi b{display:block;font-size:clamp(15px,4.4vw,22px);font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums;margin-top:2px;line-height:1.15;overflow-wrap:anywhere;word-break:break-word}
+@media(max-width:600px){.kpi{gap:8px}.kpi div{flex:1 1 42%;padding:8px 10px}.kpi b{font-size:clamp(14px,4.8vw,19px)}}
 .section{margin:30px 0 12px;font-size:16px;font-weight:600;letter-spacing:.3px;border-left:4px solid var(--blue);padding-left:12px}
 .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:6px;margin:2px 4px 2px 0}
 .b-yao{background:rgba(255,107,107,.16);color:#ff6b6b;border:1px solid #ff6b6b}
