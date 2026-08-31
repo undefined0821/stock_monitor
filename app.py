@@ -4354,6 +4354,8 @@ td:first-child,th:first-child{text-align:left}
 .gv-hit{font-size:12px;color:var(--mut)}
 .gv-hit b{font-size:14px;color:var(--blue)}
 .gv-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px 12px}
+/* 预测回测总览: 改为纵向单列(原 grid 多列把模块压成~150px窄卡, 内部4项横排溢出错版) */
+#predstats .gv-list{grid-template-columns:1fr}
 .gv-item{display:flex;align-items:center;gap:6px;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 0;border-bottom:1px solid var(--row-line)}
 .gv-item:last-child{border-bottom:none}
 .gv-name{flex:1;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
