@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.5"
+VERSION = "v3.11.6"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
