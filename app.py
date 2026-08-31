@@ -2938,22 +2938,24 @@ def _prev_trading_day(dt):
 
 
 def _log_gapup_record(rec):
-    """追加一条交易日推荐记录到 gapup_log.jsonl, 同日同 source 不重复写。"""
+    """写入/覆盖一条交易日推荐记录到 gapup_log.jsonl。
+
+    v3.11.6 修复: 同日同 source 改为**覆盖**(取当日最新一次预测), 而非跳过 —
+    原实现用「跳过」去重, 导致手动重新预测(force=True)只更新面板 STATE['gapup'],
+    却不更新回测源 gapup_log, 使「尾盘高开潜力」面板与「高开待回测」数据不一致
+    (面板显示手动列表, 实际回测/次日验证的却是每日扫描列表)。覆盖后二者始终指向同一条当日推荐。"""
     try:
-        if os.path.exists(GAPUP_LOG):
-            with open(GAPUP_LOG, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        old = json.loads(line)
-                    except Exception:
-                        continue
-                    if old.get("date") == rec.get("date") and old.get("source") == rec.get("source"):
-                        return  # 已记录, 跳过
-        with open(GAPUP_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        recs = _load_gapup_log()
+        key = (rec.get("date"), rec.get("source"))
+        for i, r in enumerate(recs):
+            if (r.get("date"), r.get("source")) == key:
+                recs[i] = rec          # 覆盖: 以当日最新预测为准
+                break
+        else:
+            recs.append(rec)          # 不存在则新增
+        with open(GAPUP_LOG, "w", encoding="utf-8") as f:
+            for r in recs:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
     except Exception:
         traceback.print_exc()
 
