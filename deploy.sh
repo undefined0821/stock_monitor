@@ -4,6 +4,8 @@
 #
 # 用法:  bash deploy.sh
 # 依赖: 线上服务可达(同一条公网链接); 本地已安装 python3.11 + node。
+# 推送策略: 第[3]步「同步到 GitHub」默认关闭(线上沙箱禁止对外请求),
+#           源码请以本地仓库提交后由本地 GitHub 推送; 设 ALLOW_SANDBOX_PUSH=1 可恢复沙箱推送。
 set -u
 
 BASE_DIR="/workspace/stock_monitor"
@@ -93,26 +95,35 @@ echo "==> [2/2] 调用发布脚本部署..."
 cd "$BASE_DIR" || exit 1
 node "$PUBLISH_JS" --dir "$BASE_DIR"
 
-echo "==> [3/3] 提交并推送到 GitHub (每次迭代即同步)..."
+echo "==> [3/3] 同步到 GitHub (本地发布通道)..."
 VER=$(grep -o 'VERSION = "[^"]*"' "$BASE_DIR/app.py" | head -1 | sed 's/VERSION = "//;s/"//')
 git add README.md app.py dashboard_snapshot.html deploy.sh .gitignore
 if git diff --cached --quiet; then
-  echo "  ✓ 无源码变更, 跳过提交"
+  echo "  ✓ 无源码变更, 跳过"
 else
-  git commit -q -m "auto: $VER 迭代发布" && echo "  ✓ 已提交 ($VER)"
-  PUSHED=0
-  for i in 1 2 3 4 5 6; do
-    out=$(GIT_TERMINAL_PROMPT=0 git push -u origin master 2>&1); rc=$?
-    if echo "$out" | grep -qiE "fetch first|rejected"; then
-      echo "  ! 远端有本地没有的提交(fetch first), 停止自动推送(请先 git pull --rebase)"; break
-    fi
-    if [ "$rc" -eq 0 ] && echo "$out" | grep -qiE "master -> master|\[new branch\]|Everything up-to-date"; then
-      echo "  ✓ 已推送到 GitHub ($VER)"; PUSHED=1; break
-    fi
-    if echo "$out" | grep -qiE "Bad credentials|Invalid username|Repository not found"; then
-      echo "  ! 认证/仓库错误, 停止推送:"; echo "$out" | tail -3; break
-    fi
-    echo "  ! 第 $i 次推送失败(TLS瞬时重置?), 3s后重试"; sleep 3
-  done
-  [ "$PUSHED" = 0 ] && echo "  ⚠️ 推送未成功, 请检查网络/凭据(代码已提交本地)"
+  if [ "${ALLOW_SANDBOX_PUSH:-0}" = "1" ]; then
+    # 仅当显式开启时才允许沙箱对外推送(默认关闭: 线上沙箱禁止对外请求, 由本地 GitHub 发布)
+    git commit -q -m "auto: $VER 迭代发布" && echo "  ✓ 已提交 ($VER)"
+    PUSHED=0
+    for i in 1 2 3 4 5 6; do
+      out=$(GIT_TERMINAL_PROMPT=0 git push -u origin master 2>&1); rc=$?
+      if echo "$out" | grep -qiE "fetch first|rejected"; then
+        echo "  ! 远端有本地没有的提交(fetch first), 停止自动推送(请先 git pull --rebase)"; break
+      fi
+      if [ "$rc" -eq 0 ] && echo "$out" | grep -qiE "master -> master|\[new branch\]|Everything up-to-date"; then
+        echo "  ✓ 已推送到 GitHub ($VER)"; PUSHED=1; break
+      fi
+      if echo "$out" | grep -qiE "Bad credentials|Invalid username|Repository not found"; then
+        echo "  ! 认证/仓库错误, 停止推送:"; echo "$out" | tail -3; break
+      fi
+      echo "  ! 第 $i 次推送失败(TLS瞬时重置?), 3s后重试"; sleep 3
+    done
+    [ "$PUSHED" = 0 ] && echo "  ⚠️ 推送未成功, 请检查网络/凭据(代码已提交本地)"
+  else
+    # 默认分支: 沙箱禁止对外请求 -> 不提交/不推送, 撤销暂存以免沙箱 git 与 GitHub 分叉。
+    # 源码变更请在本地仓库提交后由本地 GitHub 推送; 本沙箱仅负责拉取运行时数据 + 发布。
+    git reset -q
+    echo "  ⏭ 沙箱已禁对外请求(本地 GitHub 发布): 跳过提交与推送"
+    echo "     源码变更请改在本地仓库提交并 push 到 GitHub; 本沙箱只做 拉取运行时数据 + 发布"
+  fi
 fi
