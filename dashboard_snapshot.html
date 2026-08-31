@@ -67,13 +67,17 @@ td:first-child,th:first-child{text-align:left}
 .note{color:var(--mut);font-size:12px;margin-top:6px;line-height:1.5}
 /* 高开回测: 紧凑小卡(非核心内容, 仅展示昨日5只实测) */
 .gv-card{padding:10px 12px !important}
-.gv-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--mut);margin-bottom:6px}
+.gv-head{display:flex;justify-content:space-between;align-items:center;gap:4px 8px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin-bottom:6px}
 .gv-head b{color:var(--txt);font-weight:600}
 .gv-hit{font-size:12px;color:var(--mut)}
 .gv-hit b{font-size:14px;color:var(--blue)}
 .gv-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px 12px}
 /* 预测回测总览: 改为纵向单列(原 grid 多列会把每模块压成~150px窄卡, 内部4项横排溢出错版) */
 #predstats .gv-list{grid-template-columns:1fr}
+/* 尾盘高开潜力: 同步改纵向单列(原 grid 多列把个股压成~150px窄条, 代码名称/概率/涨幅/结果 4项横排溢出边框) */
+#gapverify .gv-list{grid-template-columns:1fr;gap:2px 0}
+#gapverify .gv-item{gap:8px;padding:3px 0}
+#gapverify .gv-name{min-width:0}
 .gv-item{display:flex;align-items:center;gap:6px;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 0;border-bottom:1px solid var(--row-line)}
 .gv-item:last-child{border-bottom:none}
 .gv-name{flex:1;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}

@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.1"
+VERSION = "v3.11.2"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -741,7 +741,10 @@ def index_forecast(snap=None):
     # 三段式判定: 避免在概率接近50时强行判定涨跌(阈值可由 v3.11 自动调参覆盖)
     T = _MODULE_THRESHOLDS.get("idx_1h", 58)
     verdict = "看涨" if prob >= T else ("看跌" if prob <= 100 - T else "震荡")
-    chart = fetch_minute("sh000001")
+    # v3.11.2: 分时图(可视化)改为实时拉取。ttl=0 绕过 MINUTE_CACHE_TTL 缓存,
+    # 让图表随预测本体(IDX_FORECAST_SEC=5s)同步刷新; 预测特征(_market_context 的
+    # 尾盘动向等)仍走缓存, 预测频率与 AI 融合节奏(IDX_AI_FUSE_SEC)均不变。
+    chart = fetch_minute("sh000001", ttl=0)
     confidence = _confidence(prob, breadth)
     return {
         "time": beijing_now().strftime("%H:%M:%S"),
@@ -4349,13 +4352,17 @@ td:first-child,th:first-child{text-align:left}
 .note{color:var(--mut);font-size:12px;margin-top:6px;line-height:1.5}
 /* 高开回测: 紧凑小卡(非核心内容, 仅展示昨日5只实测) */
 .gv-card{padding:10px 12px !important}
-.gv-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--mut);margin-bottom:6px}
+.gv-head{display:flex;justify-content:space-between;align-items:center;gap:4px 8px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin-bottom:6px}
 .gv-head b{color:var(--txt);font-weight:600}
 .gv-hit{font-size:12px;color:var(--mut)}
 .gv-hit b{font-size:14px;color:var(--blue)}
 .gv-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:5px 12px}
 /* 预测回测总览: 改为纵向单列(原 grid 多列把模块压成~150px窄卡, 内部4项横排溢出错版) */
 #predstats .gv-list{grid-template-columns:1fr}
+/* 尾盘高开潜力: 同步改纵向单列(原 grid 多列把个股压成~150px窄条, 代码名称/概率/涨幅/结果 4项横排溢出边框) */
+#gapverify .gv-list{grid-template-columns:1fr;gap:2px 0}
+#gapverify .gv-item{gap:8px;padding:3px 0}
+#gapverify .gv-name{min-width:0}
 .gv-item{display:flex;align-items:center;gap:6px;font-size:12px;font-variant-numeric:tabular-nums;padding:2px 0;border-bottom:1px solid var(--row-line)}
 .gv-item:last-child{border-bottom:none}
 .gv-name{flex:1;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
