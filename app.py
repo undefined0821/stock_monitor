@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.3"
+VERSION = "v3.11.4"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -2465,6 +2465,13 @@ def _current_weights(module, spec):
     return {k: float(src.get(k, default[k])) for k in spec["wkeys"]}
 
 
+def _default_weights(module, spec):
+    """v3.11.4: 出厂默认权重。与 _current_weights 的区别: 后者读 FCONFIG/SCFG,
+    会被历次调参结果写回覆盖; 本函数始终返回硬编码出厂值, 不受调参历史影响。"""
+    default = _TUNE_W_DEFAULT if spec["kind"] == "fcfg" else _SCFG_W_DEFAULT
+    return {k: float(default[k]) for k in spec["wkeys"]}
+
+
 def _tune_threshold(module, samples, spec):
     """网格搜最优报警阈值, 目标 F1; 预测为正太少则惩罚防退化解; L2 回拉默认阈值。"""
     probs = [p for p, _ in samples]
@@ -2486,9 +2493,17 @@ def _tune_threshold(module, samples, spec):
 
 
 def _tune_weights(module, samples, spec):
-    """正则化坐标上升调权重, 目标=留出验证集 F1(每层配最优阈值); L2 回拉默认防过拟合。"""
+    """正则化坐标上升调权重, 目标=留出验证集 F1(每层配最优阈值); L2 回拉默认防过拟合。
+
+    v3.11.3 修复「迭代累积漂移」: 搜索起点与 L2 锚点由"上次调优结果"改为"出厂默认权重"。
+    原实现 W0 = _current_weights() 读的是 FCONFIG/SCFG, 而调参结果会写回 FCONFIG/SCFG,
+    于是每次都在上次结果上继续迭代 —— 权重逐次累积漂移, 且 L2 的锚点本身就是上次值,
+    正则只惩罚"相对上次的抖动", 不再把权重拉回出厂默认, 早期小样本的噪声会被锁进基线。
+    改用 _default_weights() 后, 每次都是「出厂默认 + 当前全量样本」独立重搜(与 gapup 同款),
+    保留持续优化能力的同时杜绝漂移累积。
+    """
     rescore = _RESCORE[module]
-    W0 = _current_weights(module, spec)
+    W0 = _default_weights(module, spec)     # v3.11.4: 出厂默认(搜索起点 + L2 锚点)
     k = max(1, int(len(samples) * 0.2))
     train = samples[:-k] if len(samples) > 5 else samples
     test = samples[-k:] if len(samples) > 5 else samples
