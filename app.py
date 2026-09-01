@@ -30,7 +30,7 @@ from market_data import *  # 行情数据层
 from backtest import *     # 预测回测闭环
 from calib import *     # 校准与调参(拆分自 app.py)
 app = Flask(__name__)
-VERSION = "v3.11.11"
+VERSION = "v3.11.12"
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 

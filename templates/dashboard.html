@@ -33,6 +33,15 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
   padding:3px 8px;border-radius:999px;border:1px solid var(--line);background:var(--row-line);color:var(--mut);white-space:nowrap}
 .sector-chip .sp{font-weight:700;font-variant-numeric:tabular-nums}
 .sector-chip .rk{opacity:.65;font-size:9.5px}
+/* v3.11.12: 持仓卡片标题与角落芯片分离, 避免长名称/双芯片溢出边框 */
+.card h3 .h-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chips{display:flex;flex-wrap:wrap;gap:4px 6px;margin:5px 0 2px}
+/* 大盘&板块网格: 各卡片自然高度, 不再被拉伸对齐产生底部大留白 */
+.grid.markets{align-items:start}
+/* v3.11.12: 尾盘预测卡片内部两栏铺满宽度, 消除右侧大片留白 */
+.close-grid{display:grid;grid-template-columns:minmax(220px,1fr) 1.5fr;gap:16px;align-items:start;margin-top:8px}
+.close-summary{font-size:13px}
+@media(max-width:560px){.close-grid{grid-template-columns:1fr}}
 .grp{margin:8px 0 2px;font-size:10.5px;letter-spacing:1.2px;color:var(--mut);text-transform:uppercase;border-top:1px solid var(--row-line);padding-top:7px}
 .row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--row-line);font-size:12.5px}
 .row .lbl{color:var(--mut)}
@@ -43,7 +52,7 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
 .kpi div{color:var(--mut);font-size:12px}
 .kpi b{display:block;font-size:clamp(15px,4.4vw,22px);font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums;margin-top:2px;line-height:1.15;overflow-wrap:anywhere;word-break:break-word}
 @media(max-width:600px){.kpi{gap:8px}.kpi div{flex:1 1 42%;padding:8px 10px}.kpi b{font-size:clamp(14px,4.8vw,19px)}}
-.section{margin:30px 0 12px;font-size:16px;font-weight:600;letter-spacing:.3px;border-left:4px solid var(--blue);padding-left:12px}
+.section{margin:20px 0 10px;font-size:16px;font-weight:600;letter-spacing:.3px;border-left:4px solid var(--blue);padding-left:12px}
 .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:6px;margin:2px 4px 2px 0}
 .b-yao{background:rgba(255,107,107,.16);color:#ff6b6b;border:1px solid #ff6b6b}
 .b-danger{background:rgba(239,83,80,.18);color:var(--up)}
@@ -109,7 +118,7 @@ td:first-child,th:first-child{text-align:left}
 .gv-toolbar .gv-btn:hover{opacity:.88}
 .eye:hover{border-color:var(--blue)}
 /* v3.11.1: 高开回测 / 预测回测总览 并排; 窄屏自动堆叠为单列 */
-.gv-twocol{} /* 容器样式内联(两列 grid), 此处仅占位 */
+.gv-twocol{align-items:start} /* 两列各自自然高度, 不拉伸对齐产生内部留白 */
 @media(max-width:900px){.gv-twocol{grid-template-columns:1fr !important}}
 .masked{color:var(--mut);letter-spacing:2px}
 .minichart{width:100%;height:130px;margin-top:10px;border-radius:8px;background:var(--chart-bg)}
@@ -170,7 +179,7 @@ td:first-child,th:first-child{text-align:left}
 
   <!-- 5. 大盘 & 板块 -->
   <div class="section">🌐 大盘 & 板块资金动向</div>
-  <div class="grid">
+  <div class="grid markets">
     <div class="card"><h3>三大指数</h3><table id="idx"></table></div>
     <div class="card"><h3>题材涨跌（细分主线） <span class="code" id="sb2"></span></h3>
       <div id="sectors" style="max-height:300px;overflow:auto"></div>
@@ -356,10 +365,13 @@ function render(d){
     const pcd=cls(h.pct);     // 当日涨跌%: 以昨收为基准(独立于卡片主色)
     // 角落题材芯片: 所属细分题材名 + 题材平均涨跌幅 + 题材强弱排名(命中题材即自动显示)
     const secChip = h.theme_name ? `<span class="sector-chip" title="所属题材涨跌(成分股平均)">${h.theme_name} <span class="sp ${cls(h.theme_pct)}">${sign(h.theme_pct)}%</span>${h.theme_rank?'<span class="rk">'+h.theme_rank+'/'+(h.theme_total||'')+'</span>':''}</span>` : '';
-    const secBrChip = (h.sector_name && h.sector_pct!==null && h.sector_pct!==undefined) ? `<span class="sector-chip" title="所属板块(中证行业)今日涨跌幅">${h.sector_name} <span class="sp ${cls(h.sector_pct)}">${sign(h.sector_pct)}%</span></span>` : '';
+    let secBrChip = (h.sector_name && h.sector_pct!==null && h.sector_pct!==undefined) ? `<span class="sector-chip" title="所属板块(中证行业)今日涨跌幅">${h.sector_name} <span class="sp ${cls(h.sector_pct)}">${sign(h.sector_pct)}%</span></span>` : '';
+    // 题材名与板块名相同时只渲染一个, 避免卡片右上角出现重复标签
+    if(h.theme_name && h.sector_name && h.theme_name===h.sector_name) secBrChip='';
     let badges=(h.anomalies||[]).map(a=>'<span class="badge b-'+a.level+'">'+a.text+'</span>').join('');
     H.innerHTML+=`<div class="card ${pc}">
-      <h3><span>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span>${secChip}${secBrChip}</h3>
+      <h3><span class="h-name">${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span></h3>
+      ${(secChip||secBrChip)?`<div class="chips">${secChip}${secBrChip}</div>`:''}
       <div style="margin:2px 0 4px"><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pcd}">${sign(h.pct)}%</span></div>
       <div class="grp">盈亏概览</div>
       <div class="row"><span class="lbl">持仓市值</span><span class="${showMoney?'':'masked'}">${mval(h.value)}</span></div>
@@ -424,15 +436,17 @@ function render(d){
     const mBr = m.breadth!=null ? m.breadth : 0.5;
     const mLt = m.late!=null ? m.late : 0;
     const mRt = m.retail!=null ? m.retail : 0;
-    r+=`<div class="row" style="border:none"><span>大盘明日看涨概率</span><span class="prob ${probcls(m.prob)}">${fmt(m.prob,1)}% (${m.verdict}) <span class="badge ${cmBadge}" style="margin-left:6px">置信度${cmPct}%</span></span></div>`;
-    r+=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin:4px 0 8px;font-size:13px;opacity:0.85">
+    let sum=`<div class="row" style="border:none"><span>大盘明日看涨概率</span><span class="prob ${probcls(m.prob)}">${fmt(m.prob,1)}% (${m.verdict}) <span class="badge ${cmBadge}" style="margin-left:6px">置信度${cmPct}%</span></span></div>`;
+    sum+=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 2px;font-size:13px;opacity:0.85">
         <span>📊 宽度: <b>${(mBr*100).toFixed(0)}%</b></span>
         <span>🚀 尾盘动向: <b class="${cls(mLt)}">${mLt>=0?'+':''}${mLt.toFixed(2)}%</b></span>
         <span>🧩 小盘(国证2000): <b class="${cls(mRt)}">${mRt>=0?'+':''}${mRt.toFixed(2)}%</b></span>
       </div>`;
-    r+='<table><tr><th>持仓</th><th>概率</th><th>倾向</th></tr>';
-    d.close.stocks.forEach(x=>{r+=`<tr><td>${x.name}</td><td class="prob ${probcls(x.prob)}">${fmt(x.prob,1)}%</td><td>${x.verdict}</td></tr>`;});
-    r+='</table>';document.getElementById('close').innerHTML=r;}
+    let tbl='<table><tr><th>持仓</th><th>概率</th><th>倾向</th></tr>';
+    d.close.stocks.forEach(x=>{tbl+=`<tr><td>${x.name}</td><td class="prob ${probcls(x.prob)}">${fmt(x.prob,1)}%</td><td>${x.verdict}</td></tr>`;});
+    tbl+='</table>';
+    r+=`<div class="close-grid"><div class="close-summary">${sum}</div><div class="close-stocks">${tbl}</div></div>`;
+    document.getElementById('close').innerHTML=r;}
   // 尾盘高开潜力
   const gu=document.getElementById('gapup');
   if(d.gapup){const g=d.gapup;
