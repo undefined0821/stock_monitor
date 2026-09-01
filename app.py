@@ -830,12 +830,12 @@ def _build_idx_worker():
                 last_lp = STATE.get("idx_predlog_time")
                 if (not last_lp or (_now2 - last_lp).total_seconds() >= IDX_PRED_LOG_SEC):
                     STATE["idx_predlog_time"] = _now2
-                    # v3.11.x: 落盘方向与线上展示层同口径 —— 校准后概率 + 弱信号门控为「观望」
-                    _cal = round(_apply_pred_calib("idx_1h", base["prob"]), 1)
+                    # 落盘方向与线上展示层同口径(校准后概率 + 弱信号门控为「观望」);
+                    # 但 prob 存原始值(不套校准), 校准统一在展示/_recompute_pred_stats 套用, 避免二次校准与拟合反馈漂移
                     _sv = _idx_gated_verdict(base)
                     log_prediction(
                         "idx_1h",
-                        {"prob": _cal, "verdict": _sv,
+                        {"prob": round(base["prob"], 1), "verdict": _sv,
                          "price": base["price"], "key": "上证指数",
                          "feats": {"pct": base.get("pct", 0), "late": base.get("late", 0),
                                    "pos": base.get("pos", 0.5), "vr": base.get("vr", 1),
@@ -1645,6 +1645,7 @@ def _build_close_worker():
         ai = AIClient()
         m = base["market"]
         heuristic_prob = m["prob"]
+        m["heuristic_prob"] = heuristic_prob   # 供 _calib_close_view 重算置信度时还原"AI一致性"项
         if ai.available:
             sh = next((i for i in snap["indices"] if i["code"] == "sh000001"), None)
             sh_pct = sh["pct"] if sh else 0
@@ -1678,8 +1679,10 @@ def _build_close_worker():
             vat = nd.strftime("%Y-%m-%d") + " 15:05:00"
             sh_px = next((i.get("price") for i in snap.get("indices", [])
                           if i.get("code") == "sh000001"), None)
+            _cm = round(_apply_pred_calib("close_market", m["prob"]), 1)
+            _vm = _close_verdict("close_market", _cm)
             log_prediction("close_market",
-                           {"prob": m["prob"], "verdict": m["verdict"],
+                           {"prob": round(m["prob"], 1), "verdict": _vm,
                             "qcode": "sh000001", "key": "大盘(上证)",
                             "base_close": sh_px,
                             "feats": {"sh_pct": ctx["sh_pct"], "cyb_pct": ctx["cyb_pct"],
@@ -1690,8 +1693,10 @@ def _build_close_worker():
                 code = s.get("code")
                 if not code:
                     continue
+                _cs = round(_apply_pred_calib("close_stock", s.get("prob")), 1)
+                _vs = _close_verdict("close_stock", _cs)
                 log_prediction("close_stock",
-                               {"prob": s.get("prob"), "verdict": s.get("verdict"),
+                               {"prob": round(s.get("prob"), 1), "verdict": _vs,
                                 "qcode": _market_prefix(code) + code,
                                 "key": s.get("name", code),
                                 "base_close": hpx.get(code),
@@ -3781,7 +3786,9 @@ def _calib_idx_view(payload):
          「显示 13.2% 却判定看涨」这种概率与方向自相矛盾的输出。
       2) 门控: 置信度低于 idx_min_conf 时不再给出方向性判定, 改显示"观望"并置灰概率,
          避免把弱信号包装成可执行的涨跌判断。
-    仅作用于展示层 —— STATE / 落盘 / 回测仍使用原始概率与原始 verdict, 指标口径不变。
+    仅作用于展示层 —— STATE 仍存原始概率与原始 verdict(调度/AI融合需要); 但落盘(idx_1h)
+    经 _idx_gated_verdict 把 verdict 按校准后概率重判(含观望门控), 与展示层同口径; 落盘 prob
+    仍存原始值(校准在展示/_recompute_pred_stats 统一套用, 避免二次校准与拟合反馈漂移), 回测指标一致。
     """
     if not isinstance(payload, dict) or "prob" not in payload:
         return payload
@@ -3830,16 +3837,35 @@ def _idx_gated_verdict(base):
     return verdict if actionable else ("震荡" if verdict == "震荡" else "观望")
 
 
+def _close_verdict(module, cal_prob):
+    """按【校准后】概率重判收盘模块方向(偏多/偏空/震荡), 与 _calib_close_view 同一口径。
+    收盘模块无弱信号门控(无 close_min_conf 配置), 故不转「观望」。"""
+    T = _clamp_threshold(module, _MODULE_THRESHOLDS.get(module, _TUNE_SPEC[module]["def_thr"]))
+    return "偏多" if cal_prob >= T else ("偏空" if cal_prob <= 100 - T else "震荡")
+
+
 def _calib_close_view(payload):
-    """尾盘预测(大盘+个股)的实时概率校准(复制后改, 不动 STATE)。"""
+    """尾盘预测(大盘+个股)的实时概率校准(复制后改, 不动 STATE)。
+    修复「校准后概率与方向自相矛盾」: prob 经 Platt 校准后, verdict 一律按【校准后】概率
+    重判(偏多/偏空/震荡), 与 _calib_idx_view 同一思路; 旧逻辑只校准 prob 不复判 verdict,
+    会出现「显示校准后48%却判定偏多」的矛盾。收盘模块无弱信号门控(无 close_min_conf 配置),
+    故不转「观望」; 落盘(见 _build_close_worker)也用同一函数, 保证回测总览方向与线上展示层一致。"""
     if not isinstance(payload, dict):
         return payload
     p = copy.deepcopy(payload)
     if isinstance(p.get("market"), dict):
-        p["market"]["prob"] = round(_apply_pred_calib("close_market", p["market"].get("prob", 0)), 1)
+        m = p["market"]
+        m["raw_prob"] = round(m.get("prob", 0) or 0, 1)
+        m["prob"] = round(_apply_pred_calib("close_market", m["prob"]), 1)
+        m["verdict"] = _close_verdict("close_market", m["prob"])
+        m["confidence"] = _confidence(m["prob"], m.get("breadth", 0.5),
+                                      ai_prob=m.get("ai_prob"),
+                                      heuristic_prob=m.get("heuristic_prob"))
     for s in (p.get("stocks") or []):
         if isinstance(s, dict):
-            s["prob"] = round(_apply_pred_calib("close_stock", s.get("prob", 0)), 1)
+            s["raw_prob"] = round(s.get("prob", 0) or 0, 1)
+            s["prob"] = round(_apply_pred_calib("close_stock", s["prob"]), 1)
+            s["verdict"] = _close_verdict("close_stock", s["prob"])
     return p
 
 
