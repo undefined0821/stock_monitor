@@ -3,7 +3,7 @@
 由 app.py 拆分而来, 各子模块用 `from core import *` 引入, 避免循环依赖。"""
 
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
-__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_HERE', '_HOLD_LOCK', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
+__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -196,6 +196,16 @@ def trading_phase(dt):
 # ----------------------------- 行情抓取 -----------------------------
 _TENCENT_SESSION = None
 _FETCH_POOL = None
+_MINUTE_CACHE = {}  # 分时数据缓存(dict code->(ts, rows)); fetch_minute 复用, 降低接口压力
+
+# ---------------- v3.10: 概率校准(Platt scaling) 共享状态 ----------------
+# 问题: sigmoid(score/gu_sig) 只是单调变换, gu_sig 是拍脑袋定的, 输出并非真实概率。
+# 实测: 宣称 66.9% 概率, 实际高开率仅 40%(严格≥0.5% 仅 20%), 校准偏差 +26.9pp。
+# 方案: 用已验证样本 (score, 是否真高开) 拟合 Platt scaling: P = 1/(1+exp(A*score+B)),
+# 让输出概率名副其实。样本不足时自动降级不启用, 避免小样本过拟合。
+_GAPUP_CALIB = {"A": None, "B": None, "n": 0, "fitted_at": None}
+# v3.10.1: 各 P1 模块的概率校准参数(按模块独立), 形如 {"idx_1h": {"A":1.0,"B":..,"n":..}, ...}
+_PRED_CALIB = {}
 
 def num(x, default=0.0):
     try:

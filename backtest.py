@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """预测回测闭环: 落盘/统计/验证/告警。由 app.py 拆分。"""
 
-import json, re, math, time, threading, datetime, os, random, copy
+import json, re, math, time, threading, datetime, os, random, traceback, copy
 from core import *
 import requests
+import app  # 延迟引用: optimize_gapup_weights 用到 app._WeightOverride / app.gap_up_score
 
 __all__ = ['IDX_PRED_LOG_SEC', 'LIMITUP_HIT_PCT', 'PRED_MODULES', '_accumulate_stats', '_actual_any', '_actual_hit', '_add_trading_minutes', '_day_pct', '_day_pct_local', '_find_verify_target', '_gapup_auc', '_kline_bars_range', '_live_day_pct', '_live_next_day_return', '_load_gapup_log', '_load_pred_log', '_load_stats', '_next_day_return', '_next_day_return_local', '_next_trading_day', '_recompute_pred_stats', '_save_pred_log', '_save_stats', '_verdict_hit', '_verify_one_pred', 'detect_alerts', 'load_pred_stats', 'log_prediction', 'optimize_gapup_weights', 'verify_predictions']
 def _load_gapup_log():
@@ -217,8 +218,8 @@ def optimize_gapup_weights():
                      "amplitude": 0}
                 ctx = {"breadth": feat.get("breadth", 0.5), "retail_pct": feat.get("retail", 0),
                        "sector_avg": 0, "late": feat.get("idx_late", 0)}
-                with _WeightOverride(weights):
-                    scores.append(gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
+                with app._WeightOverride(weights):
+                    scores.append(app.gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
             auc = _gapup_auc(scores, ys)
             reg = sum(((weights[k] - base[k]) / base[k]) ** 2 for k in tune_keys)
             cal = (sum(scores) / len(scores) / 100.0 - gap_rate) ** 2  # 预测均值(0-1)对齐实际高开率
@@ -250,8 +251,8 @@ def optimize_gapup_weights():
                      "amplitude": 0}
                 ctx = {"breadth": feat.get("breadth", 0.5), "retail_pct": feat.get("retail", 0),
                        "sector_avg": 0, "late": feat.get("idx_late", 0)}
-                with _WeightOverride(weights):
-                    scores.append(gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
+                with app._WeightOverride(weights):
+                    scores.append(app.gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
             return _gapup_auc(scores, ys)
         auc_before = round(_auc_only(base), 4)
         auc_after = round(_auc_only(best), 4)
