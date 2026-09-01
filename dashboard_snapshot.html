@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>实时持仓监控平台 v3.11.7</title>
+<title>实时持仓监控平台 v3.11.8</title>
 <style>
 :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--up:#ef5350;--down:#26a69a;
 --txt:#e6edf3;--mut:#8b949e;--gold:#e3b341;--blue:#58a6ff;--row-line:#21262d;--feed-bg:#11161d;--chart-bg:#0b0f14}
@@ -217,7 +217,7 @@ td:first-child,th:first-child{text-align:left}
     </div>
   </div>
   <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
-  <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">v3.11.7</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
+  <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">v3.11.8</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
 </div>
 <script>
 const fmt=(n,d=2)=>n==null||isNaN(n)?'--':Number(n).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -304,16 +304,21 @@ function render(d){
   // 指数1小时预测 + 分时图
   const ifEl=document.getElementById('idxforecast');
   if(d.idx_forecast){const f=d.idx_forecast;
-    const up=f.verdict==='看涨';
     const conf = f.confidence!=null ? f.confidence : 0;
     const confPct = Math.round(conf*100);
     const confBadge = conf>=0.65 ? 'b-up' : (conf>=0.4 ? 'b-info' : 'b-muted');
+    // v3.11.7: 三态着色 —— 旧版 up=(verdict==='看涨') 把"震荡"也一并染成了看跌色
+    const dv = f.display_verdict || f.verdict || '震荡';
+    const vcls = dv==='看涨' ? 'up' : (dv==='看跌' ? 'down' : 'flat');
+    const act = f.actionable === true;
+    const needPct = Math.round((f.min_conf!=null?f.min_conf:0.35)*100);
+    const noSig = act ? '' : ` <span class="badge b-muted" title="置信度需≥${needPct}% 才给出方向判定">信号不足</span>`;
     const breadth = f.breadth!=null ? f.breadth : 0.5;
     const late = f.late!=null ? f.late : 0;
     const retail = f.retail!=null ? f.retail : 0;
     ifEl.innerHTML=`<div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
       <span>现价 <b class="px ${cls(f.pct)}">${fmt(f.price)}</b> <span class="pct ${cls(f.pct)}">${sign(f.pct)}%</span></span>
-      <span>1小时后<b class="gauge ${up?'up':'down'}"> ${fmt(f.prob,1)}%</b> <b class="${up?'up':'down'}">${f.verdict}</b></span>
+      <span>1小时后<b class="gauge ${vcls}"> ${fmt(f.prob,1)}%</b> <b class="${vcls}">${dv}</b>${noSig}</span>
       <span class="note">更新 ${f.time} ｜ 日内高${fmt(f.high)} 低${fmt(f.low)} ｜ 置信度<span class="badge ${confBadge}">${confPct}%</span></span></div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin:6px 0;font-size:13px;opacity:0.85">
         <span>📊 宽度(上涨板块占比): <b>${(breadth*100).toFixed(0)}%</b></span>
@@ -486,7 +491,7 @@ function renderGapVerify(d){
 
 // 预测回测总览(v3.10): 四个预测模块的命中率/平均预测概率/校准偏差 + 日线库状态
 const PRED_LABELS={idx_1h:'上证1小时方向',close_market:'尾盘大盘次日',close_stock:'尾盘个股次日',preopen_limitup:'盘前涨停预测',gapup:'尾盘高开潜力'};
-const PRED_MIN_CALIB=12;   // 概率校准自动启用的样本阈值(与后端 PRED_MIN_CALIB_SAMPLES 同步)
+const PRED_MIN_CALIB=30;   // 概率校准自动启用的样本阈值(与后端 PRED_MIN_CALIB_SAMPLES 同步)
 function renderPredStats(s){
   const box=document.getElementById('predstats');
   if(!box) return;

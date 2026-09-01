@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.7"
+VERSION = "v3.11.8"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -4138,7 +4138,9 @@ def api_close():
 
 @app.route("/api/idx")
 def api_idx():
-    STATE["idx_forecast_time"] = beijing_now().strftime("%Y-%m-%d")
+    # v3.11.8: 必须为 datetime(调度循环 now-last 做时间减法), 旧代码写成 strftime 字符串会
+    # 导致 scheduler_loop 每轮 TypeError 崩溃; 置为 now 既修复类型又保持节流语义。
+    STATE["idx_forecast_time"] = beijing_now()
     _start_idx_build()
     with LOCK:
         cur = STATE["idx_forecast"]
