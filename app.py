@@ -18,7 +18,7 @@ import requests
 _HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = _HERE if os.path.isdir(_HERE) else "/workspace/stock_monitor"
 PORT = int(os.environ.get("PORT", 8800))
-VERSION = "v3.11.6"
+VERSION = "v3.11.7"
 PORTFOLIO_PATH = f"{BASE}/portfolio.json"
 _HOLD_LOCK = threading.Lock()   # 持仓配置热重载锁(前端编辑保存后无需重启)
 
@@ -56,7 +56,15 @@ PRED_STATS = f"{BASE}/pred_stats.json"
 # v3.10.1: 预测概率自动校准(Platt scaling, 与 gapup 同款): 4 个 P1 模块(上证1小时/尾盘大盘/尾盘个股/盘前涨停)
 # 的概率输出随验证样本积累自动收敛到真实命中率。校准参数按模块分别持久化, 避免互相干扰。
 PRED_CALIB = f"{BASE}/pred_calib.json"
-PRED_MIN_CALIB_SAMPLES = 12
+# v3.11.7: 12 条样本对 Platt scaling 而言过少(业界通常要求 50+), 实测 idx_1h 用 15 条
+# 样本拟合出的校准把整个概率分布压垮(见下方 _CALIB_MAX_ABS_B 注释), 故门槛提高到 30。
+PRED_MIN_CALIB_SAMPLES = 30
+# v3.11.7: Platt 校准参数护栏。B 是 logit 空间的平移量, 样本稀少时极易被拟合出极端值:
+# 实测 idx_1h 仅 15 条样本就拟合出 B=-1.7598, 把中性 50% 压到 14.7%、把强多头 72% 压到 30.7%,
+# 使"看涨"在数学上几乎不可能触发(需原始概率>86%), 表现为"概率永远很低"。
+# 故限制中性点(prob=50)校准后落在 [30%, 70%] 区间内, 即 |B| <= ln(0.7/0.3) ≈ 0.847。
+_CALIB_MAX_ABS_B = 0.85
+_CALIB_A_RANGE = (0.5, 2.0)      # 斜率合理区间, 防止 A 退化或爆炸
 
 with open(f"{BASE}/portfolio.json", "r", encoding="utf-8") as f:
     CFG = json.load(f)
@@ -91,6 +99,11 @@ _FORECAST_DEFAULTS = {
     # 上证指数1小时趋势预测
     "idx_pct_w": 2.2, "idx_late_w": 1.8, "idx_pos_w": 2.0, "idx_vr_w": 1.0,
     "idx_wb_w": 1.5, "idx_breadth_w": 3.0, "idx_retail_w": 0.8, "idx_sig": 6.0,
+    # v3.11.7: 上证1小时「给出方向性判定」所需的最低置信度(展示层门控)。
+    # 低于此值只显示"观望", 不再把弱信号包装成涨跌判断。
+    # 可用 portfolio.json 的 settings.forecast.idx_min_conf 覆盖。
+    # 注意: 不要加进 _TUNE_W_DEFAULT —— 那会被自动调参器当作可调权重优化掉。
+    "idx_min_conf": 0.35,
     # 尾盘预测(大盘明日方向)
     "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
     "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
@@ -780,6 +793,8 @@ def _build_idx_worker():
         if "error" not in base:
             ai = AIClient()
             heuristic_prob = base["prob"]
+            # v3.11.7: 保留启发式原始概率, 供展示层按校准后概率重算置信度时还原"AI一致性"项
+            base["heuristic_prob"] = heuristic_prob
             # v3.10: 预测本体已提频到5秒, 但远程AI较慢, AI融合按 IDX_AI_FUSE_SEC 降频,
             # 两次AI之间直接采用纯启发式结果(随行情5秒更新), 避免高频打爆AI接口。
             _now = beijing_now()
@@ -2230,6 +2245,10 @@ def _apply_pred_calib(module, prob):
         p = max(1e-6, min(0.999999, float(prob) / 100.0))
         lo = math.log(p / (1.0 - p))            # logit 变换
         A, B = c["A"], c["B"]
+        # v3.11.7: 截距/斜率护栏 —— 防止少样本拟合出极端校准参数把概率整体压垮
+        # (详见 _CALIB_MAX_ABS_B 处注释)。校准失败风险远小于"概率失真"的风险。
+        B = max(-_CALIB_MAX_ABS_B, min(_CALIB_MAX_ABS_B, float(B)))
+        A = max(_CALIB_A_RANGE[0], min(_CALIB_A_RANGE[1], float(A)))
         z = max(-60.0, min(60.0, A * lo + B))
         return 1.0 / (1.0 + math.exp(-z)) * 100
     except Exception:
@@ -2352,6 +2371,26 @@ _TUNE_SPEC = {
               "gu_latepull_w", "gu_breadth_w", "gu_retail_w", "gu_idxlate_w", "gu_parab_peak", "gu_sig"],
               "pos": "gapup", "def_thr": None, "feats": None},
 }
+
+# v3.11.7: 方向型预测(pos="up")的阈值语义护栏。
+# prob 的语义是"上涨概率", 判定看涨的阈值必须显著高于 50 —— 否则会出现
+# 「上涨概率47%却判定看涨」这种概率与方向自相矛盾的结果。
+# (实测: 自动调参仅用15条样本就把 idx_1h 阈值从默认58拉到45, 触发了该问题。)
+# 涨停预测(pos="limitup")属稀有事件, 阈值低于50是合理的, 不受此约束。
+_THR_FLOOR_UP = 52      # 方向型阈值下限(须>50, 留2pp噪声余量)
+_THR_CEIL_UP = 85       # 方向型阈值上限(过高则几乎永不触发, 同样无意义)
+
+
+def _clamp_threshold(module, thr):
+    """把阈值收敛到语义合法区间(仅方向型 pos="up" 受限, 其余模块原样返回)。"""
+    try:
+        t = int(round(float(thr)))
+    except (TypeError, ValueError):
+        return thr
+    spec = _TUNE_SPEC.get(module) or {}
+    if spec.get("pos") != "up":
+        return t
+    return max(_THR_FLOOR_UP, min(_THR_CEIL_UP, t))
 
 
 def _rescore_idx(f, w):
@@ -2482,7 +2521,7 @@ def _tune_threshold(module, samples, spec):
     probs = [p for p, _ in samples]
     rets = [r for _, r in samples]
     def_thr, pos = spec["def_thr"], spec["pos"]
-    lo, hi = (45, 85) if pos == "up" else (30, 90)
+    lo, hi = (_THR_FLOOR_UP, _THR_CEIL_UP) if pos == "up" else (30, 90)
     best = None
     for T in range(lo, hi + 1, 5):
         prec, rec, f1, np_ = _threshold_metrics(probs, rets, T, pos)
@@ -2675,7 +2714,8 @@ def _apply_pred_tune_one(module):
         return
     thr = (res.get("threshold") or {}).get("threshold")
     if isinstance(thr, (int, float)):
-        _MODULE_THRESHOLDS[module] = int(round(thr))
+        # v3.11.7: 应用前先做语义钳制, 修正历史已落盘的不合法阈值(如 idx_1h 的 45)
+        _MODULE_THRESHOLDS[module] = _clamp_threshold(module, thr)
     wv = (res.get("weights") or {}).get("values")
     if isinstance(wv, dict) and wv:
         dst = FCONFIG if spec["kind"] == "fcfg" else SCFG
@@ -3724,11 +3764,42 @@ def load_pred_stats():
 
 # ---------------- v3.10.1: 实时输出的概率校准(展示层, 不污染 STATE/落盘) ----------------
 def _calib_idx_view(payload):
-    """上证1小时预测的实时概率校准(复制后改, 不动 STATE)。"""
+    """上证1小时预测的实时概率校准(复制后改, 不动 STATE)。
+
+    v3.11.7 修复「概率低 / 置信度低却仍展示方向」:
+      1) 一致性: 概率经 Platt 校准后, verdict 与 confidence 一律按【校准后】概率重算。
+         旧逻辑只在原始概率上判方向, 而校准又只改了 prob, 于是出现
+         「显示 13.2% 却判定看涨」这种概率与方向自相矛盾的输出。
+      2) 门控: 置信度低于 idx_min_conf 时不再给出方向性判定, 改显示"观望"并置灰概率,
+         避免把弱信号包装成可执行的涨跌判断。
+    仅作用于展示层 —— STATE / 落盘 / 回测仍使用原始概率与原始 verdict, 指标口径不变。
+    """
     if not isinstance(payload, dict) or "prob" not in payload:
         return payload
     p = dict(payload)
-    p["prob"] = round(_apply_pred_calib("idx_1h", p.get("prob", 0)), 1)
+    raw_prob = float(p.get("prob", 0) or 0)
+    prob = round(_apply_pred_calib("idx_1h", raw_prob), 1)
+    p["raw_prob"] = round(raw_prob, 1)        # 保留校准前概率, 便于排查与对比
+    p["prob"] = prob
+    # ① 按校准后概率重判方向(阈值同样走语义护栏, 保证 >50)
+    T = _clamp_threshold("idx_1h",
+                         _MODULE_THRESHOLDS.get("idx_1h", _TUNE_SPEC["idx_1h"]["def_thr"]))
+    verdict = "看涨" if prob >= T else ("看跌" if prob <= 100 - T else "震荡")
+    p["verdict"] = verdict
+    # ② 按校准后概率重算置信度(dist 项随概率变化; AI 一致性项沿用原始启发式概率)
+    conf = _confidence(prob, p.get("breadth", 0.5),
+                       ai_prob=p.get("ai_prob"),
+                       heuristic_prob=p.get("heuristic_prob"))
+    p["confidence"] = conf
+    # ③ 弱信号门控: 方向性判定需同时满足「有方向」且「置信度达标」
+    min_conf = float(FCONFIG.get("idx_min_conf", 0.35))
+    actionable = verdict in ("看涨", "看跌") and conf >= min_conf
+    p["min_conf"] = min_conf
+    p["actionable"] = actionable
+    p["display_verdict"] = verdict if actionable else ("震荡" if verdict == "震荡" else "观望")
+    if not actionable:
+        p["note"] = (p.get("note", "") +
+                     f" ｜ 置信度{conf:.2f} < {min_conf:.2f}, 信号不足, 仅观望不判方向")
     return p
 
 
@@ -4611,16 +4682,21 @@ function render(d){
   // 指数1小时预测 + 分时图
   const ifEl=document.getElementById('idxforecast');
   if(d.idx_forecast){const f=d.idx_forecast;
-    const up=f.verdict==='看涨';
     const conf = f.confidence!=null ? f.confidence : 0;
     const confPct = Math.round(conf*100);
     const confBadge = conf>=0.65 ? 'b-up' : (conf>=0.4 ? 'b-info' : 'b-muted');
+    // v3.11.7: 三态着色 —— 旧版 up=(verdict==='看涨') 把"震荡"也一并染成了看跌色
+    const dv = f.display_verdict || f.verdict || '震荡';
+    const vcls = dv==='看涨' ? 'up' : (dv==='看跌' ? 'down' : 'flat');
+    const act = f.actionable === true;
+    const needPct = Math.round((f.min_conf!=null?f.min_conf:0.35)*100);
+    const noSig = act ? '' : ` <span class="badge b-muted" title="置信度需≥${needPct}% 才给出方向判定">信号不足</span>`;
     const breadth = f.breadth!=null ? f.breadth : 0.5;
     const late = f.late!=null ? f.late : 0;
     const retail = f.retail!=null ? f.retail : 0;
     ifEl.innerHTML=`<div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap">
       <span>现价 <b class="px ${cls(f.pct)}">${fmt(f.price)}</b> <span class="pct ${cls(f.pct)}">${sign(f.pct)}%</span></span>
-      <span>1小时后<b class="gauge ${up?'up':'down'}"> ${fmt(f.prob,1)}%</b> <b class="${up?'up':'down'}">${f.verdict}</b></span>
+      <span>1小时后<b class="gauge ${vcls}"> ${fmt(f.prob,1)}%</b> <b class="${vcls}">${dv}</b>${noSig}</span>
       <span class="note">更新 ${f.time} ｜ 日内高${fmt(f.high)} 低${fmt(f.low)} ｜ 置信度<span class="badge ${confBadge}">${confPct}%</span></span></div>
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin:6px 0;font-size:13px;opacity:0.85">
         <span>📊 宽度(上涨板块占比): <b>${(breadth*100).toFixed(0)}%</b></span>
@@ -4793,7 +4869,7 @@ function renderGapVerify(d){
 
 // 预测回测总览(v3.10): 四个预测模块的命中率/平均预测概率/校准偏差 + 日线库状态
 const PRED_LABELS={idx_1h:'上证1小时方向',close_market:'尾盘大盘次日',close_stock:'尾盘个股次日',preopen_limitup:'盘前涨停预测',gapup:'尾盘高开潜力'};
-const PRED_MIN_CALIB=12;   // 概率校准自动启用的样本阈值(与后端 PRED_MIN_CALIB_SAMPLES 同步)
+const PRED_MIN_CALIB=30;   // 概率校准自动启用的样本阈值(与后端 PRED_MIN_CALIB_SAMPLES 同步)
 function renderPredStats(s){
   const box=document.getElementById('predstats');
   if(!box) return;
