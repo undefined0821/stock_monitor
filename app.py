@@ -830,9 +830,12 @@ def _build_idx_worker():
                 last_lp = STATE.get("idx_predlog_time")
                 if (not last_lp or (_now2 - last_lp).total_seconds() >= IDX_PRED_LOG_SEC):
                     STATE["idx_predlog_time"] = _now2
+                    # v3.11.x: 落盘方向与线上展示层同口径 —— 校准后概率 + 弱信号门控为「观望」
+                    _cal = round(_apply_pred_calib("idx_1h", base["prob"]), 1)
+                    _sv = _idx_gated_verdict(base)
                     log_prediction(
                         "idx_1h",
-                        {"prob": base["prob"], "verdict": base["verdict"],
+                        {"prob": _cal, "verdict": _sv,
                          "price": base["price"], "key": "上证指数",
                          "feats": {"pct": base.get("pct", 0), "late": base.get("late", 0),
                                    "pos": base.get("pos", 0.5), "vr": base.get("vr", 1),
@@ -3463,11 +3466,14 @@ def log_prediction(module, pred, verify_at, items=None):
 
 
 def _verdict_hit(verdict, ret, flat_band):
-    """方向命中判定: 多/空看符号, 震荡看是否落在阈值带内。"""
+    """方向命中判定: 多/空看符号, 震荡看是否落在阈值带内。
+    观望(弱信号未判方向)为非方向性预测, 返回 None —— 不计入方向命中率分子/分母。"""
     if verdict in ("看涨", "偏多"):
         return ret > 0
     if verdict in ("看跌", "偏空"):
         return ret < 0
+    if verdict == "观望":
+        return None
     return abs(ret) <= flat_band
 
 
@@ -3601,7 +3607,7 @@ def _verify_one_pred(rec):
             return False
         ret = (p1 - p0) / p0 * 100
         hit = _verdict_hit(pred.get("verdict"), ret, PRED_MODULES[module]["flat"])
-        rec["actual"] = {"price": round(p1, 2), "ret": round(ret, 3), "hit": bool(hit)}
+        rec["actual"] = {"price": round(p1, 2), "ret": round(ret, 3), "hit": hit}
     elif module in ("close_market", "close_stock"):
         code = pred.get("qcode")
         if not code:
@@ -3703,11 +3709,13 @@ def _recompute_pred_stats():
             buckets[m].append(r)
     for m, rows in buckets.items():
         n = len(rows)
-        ent = {"label": PRED_MODULES[m]["label"], "n": n, "hit": 0,
+        # 观望(弱信号未判方向)为非方向性预测, 方向命中率只统计有明确方向的下注
+        n_dir = sum(1 for r in rows if r["actual"].get("hit") is not None)
+        ent = {"label": PRED_MODULES[m]["label"], "n": n_dir, "hit": 0,
                "hit_rate": None, "avg_pred": None, "avg_ret": None,
                "bias_pp": None, "by_verdict": {}, "recent": [], "calib": None}
-        if n:
-            hits = sum(1 for r in rows if r["actual"].get("hit"))
+        if n_dir:
+            hits = sum(1 for r in rows if r["actual"].get("hit") is True)
             # v3.10.1: 概率校准状态(展示用); 平均预测概率本身已按校准参数对齐
             c = _PRED_CALIB.get(m)
             ent["calib"] = ({"n": c["n"], "B": round(c["B"], 3),
@@ -3719,12 +3727,12 @@ def _recompute_pred_stats():
             rets = [r["actual"].get("ret") for r in rows
                     if isinstance(r["actual"].get("ret"), (int, float))]
             ent["hit"] = hits
-            ent["hit_rate"] = round(hits / n, 4)
+            ent["hit_rate"] = round(hits / n_dir, 4)
             if preds:
                 mp = sum(preds) / len(preds)
                 ent["avg_pred"] = round(mp, 2)
                 # 校准偏差: 平均宣称概率 - 实际命中率。>0 表示系统性高估(过度自信)
-                ent["bias_pp"] = round(mp - hits / n * 100, 2)
+                ent["bias_pp"] = round(mp - hits / n_dir * 100, 2)
             if rets:
                 ent["avg_ret"] = round(sum(rets) / len(rets), 3)
             bv = {}
@@ -3734,7 +3742,8 @@ def _recompute_pred_stats():
                 b["n"] += 1
                 b["hit"] += 1 if r["actual"].get("hit") else 0
             ent["by_verdict"] = {k: {"n": v["n"], "hit": v["hit"],
-                                     "rate": round(v["hit"] / v["n"], 4) if v["n"] else None}
+                                     "rate": (round(v["hit"] / v["n"], 4)
+                                              if (v["n"] and k != "观望") else None)}
                                  for k, v in bv.items()}
             rows_sorted = sorted(rows, key=lambda x: x.get("verified_at", ""), reverse=True)
             ent["recent"] = [{"date": r.get("date"), "key": r.get("key"),
@@ -3801,6 +3810,24 @@ def _calib_idx_view(payload):
         p["note"] = (p.get("note", "") +
                      f" ｜ 置信度{conf:.2f} < {min_conf:.2f}, 信号不足, 仅观望不判方向")
     return p
+
+
+def _idx_gated_verdict(base):
+    """与 _calib_idx_view 完全一致的「方向」裁决, 专供落盘/回测使用:
+    先按 Platt 校准后概率重判 看涨/看跌/震荡, 再对弱信号(置信度<idx_min_conf)门控为「观望」。
+    使回测总览的 idx_1h 方向与线上实时展示层保持同一套口径。
+    注: 置信度与 _calib_idx_view 一样基于校准后概率重算(不读 base 里缓存的 confidence), 保证两处逐字节一致。"""
+    raw_prob = float(base.get("prob", 0) or 0)
+    prob = round(_apply_pred_calib("idx_1h", raw_prob), 1)
+    T = _clamp_threshold("idx_1h",
+                         _MODULE_THRESHOLDS.get("idx_1h", _TUNE_SPEC["idx_1h"]["def_thr"]))
+    verdict = "看涨" if prob >= T else ("看跌" if prob <= 100 - T else "震荡")
+    conf = _confidence(prob, base.get("breadth", 0.5),
+                       ai_prob=base.get("ai_prob"),
+                       heuristic_prob=base.get("heuristic_prob"))
+    min_conf = float(FCONFIG.get("idx_min_conf", 0.35))
+    actionable = verdict in ("看涨", "看跌") and conf >= min_conf
+    return verdict if actionable else ("震荡" if verdict == "震荡" else "观望")
 
 
 def _calib_close_view(payload):
