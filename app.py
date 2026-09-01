@@ -10,14 +10,27 @@
 """
 from flask import Flask, Response, jsonify, request
 import requests
-import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
+import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy, sys
+
+# 以 `python app.py` 直接启动时, 本文件以 __main__ 身份执行; 而 scheduler.py / backtest.py
+# 里的 `import app` 会再加载一份同名副本。两份副本各自持有一套模块级状态, 会造成两个问题:
+#   ① 副本与 __main__ 的 HOLDINGS 互不相通 —— 前端 /api/portfolio 保存后只更新了 __main__
+#      那份, 调度循环却用副本那份 build_snapshot, 5 秒内又把旧持仓写回 STATE["latest"],
+#      表现为"改了持仓又变回去";
+#   ② 副本重复执行初始化(重复读盘/重复建线程池), 且一旦子模块存在循环导入, 副本会拿到
+#      半成品命名空间(见 backtest._app 的说明), 调度循环随即崩溃。
+# 这里在加载任何子模块之前, 把 __main__ 登记为 'app', 保证 `import app` 拿到同一份实例。
+# 正常以 `import app` 方式加载时(如 build_static.py / gunicorn), __name__ != '__main__', 本段跳过。
+if __name__ == "__main__" and sys.modules.get("__main__") is not None:
+    sys.modules.setdefault("app", sys.modules["__main__"])
+
 from config import *  # 业务配置(板块/题材)
 from core import *    # 共享核心: BASE/STATE/FCONFIG/SCFG/全局常量/时间工具
 from market_data import *  # 行情数据层
 from backtest import *     # 预测回测闭环
 from calib import *     # 校准与调参(拆分自 app.py)
 app = Flask(__name__)
-VERSION = "v3.11.10"
+VERSION = "v3.11.11"
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 
@@ -75,6 +88,17 @@ def match_theme(text):
             if kw and kw in text:
                 return tname
     return None
+
+
+def _clean_theme(theme):
+    """归一化题材字段: null / 'None' / 'none' / 'null' / '未知' / '' 等假值转为空串,
+    避免前端把脏值(如字符串 'None')当成有效题材渲染芯片。"""
+    if theme is None:
+        return ""
+    t = str(theme).strip()
+    if not t or t.lower() in ("none", "null", "未知", "暂无", "nan"):
+        return ""
+    return t
 
 
 def auto_classify(code, market=None, name="", use_cache=True):
@@ -408,7 +432,7 @@ def _normalize_holdings(raw):
             "open_date": str(h.get("open_date", "")).strip(),
             "name": str(h.get("name", "")).strip(),
             # 题材自动归类结果(前端新增持仓保存时写入, 启动后台线程补齐存量); 为空则回退 STOCK_THEMES/STOCK_SECTOR
-            "theme": str(h.get("theme", "")).strip(),
+            "theme": _clean_theme(h.get("theme")),
             # 板块归属: 优先用 portfolio.json 显式设置, 否则回退到内置 STOCK_SECTOR 表
             "sector_code": str(h.get("sector_code", "")).strip()
                             or _SECTOR_NAME_TO_CODE.get(STOCK_SECTOR.get(str(h.get("code", "")).strip(), ""), ""),
@@ -1268,7 +1292,7 @@ def build_snapshot():
     for h in holdings:
         if h.get("error"):
             continue
-        tlist = h.get("theme") or STOCK_THEMES.get(h["code"])
+        tlist = _clean_theme(h.get("theme")) or STOCK_THEMES.get(h["code"])
         if not tlist:
             broad = STOCK_SECTOR.get(h["code"])
             tlist = [broad] if broad else None
@@ -1287,10 +1311,16 @@ def build_snapshot():
             h["theme_pct"] = _sec_pct_by_name[tname]
             h["theme_rank"] = None
             h["theme_total"] = None
+    # 为每只持仓附加"所属板块(中证行业)今日涨跌幅", 供卡片角落板块芯片展示(板块联动)。
+    for h in holdings:
+        if h.get("error"):
+            continue
+        sn = h.get("sector_name")
+        h["sector_pct"] = _sec_pct_by_name.get(sn) if sn else None
     up = [s for s in sectors if s["pct"] > 0]
     avg = sum(s["pct"] for s in sectors) / len(sectors) if sectors else 0
-    bias = ("资金偏流入/板块上升" if avg > 0.3
-            else "资金偏流出/板块下降" if avg < -0.3 else "板块分化/震荡")
+    bias = ("多数板块上涨" if avg > 0.3
+            else "多数板块下跌" if avg < -0.3 else "板块分化")
 
     # 散户今日平均盈亏(以国证2000小盘股指数当日涨跌幅近似)
     rd = parse_row(q.get(RETAIL_INDEX[0].upper(), []))
@@ -2086,25 +2116,8 @@ def _daily_universe():
     return codes
 
 
-def _load_daily():
-    out = []
-    if not os.path.exists(DAILY_BARS):
-        return out
-    try:
-        with open(DAILY_BARS, "r", encoding="utf-8") as f:
-            for ln in f:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(json.loads(ln))
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    out.sort(key=lambda r: r.get("date", ""))
-    return out
-
+# _load_daily() 已下沉到 backtest.py(本文件通过 `from backtest import *` 复用),
+# 原因见 backtest._load_daily 的文档字符串: 模块加载顺序导致本文件定义的名字无法被回测层引用。
 
 def _daily_size_mb(recs):
     return sum(len(json.dumps(r, ensure_ascii=False)) + 1 for r in recs) / 1024.0 / 1024.0

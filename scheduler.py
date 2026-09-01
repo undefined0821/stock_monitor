@@ -85,6 +85,16 @@ def scheduler_loop():
                     STATE["pred_verify_time"] = now
                     threading.Thread(target=app.verify_predictions, daemon=True).start()
 
+                # v3.11.11: 预测校准自动调参(无需前端手动按钮): 每30分钟一次,
+                # 达到样本阈值即生效, 否则保持待激活; 与 verify_predictions 同节拍, 降频避免抖动
+                last_at = STATE.get("auto_tune_time")
+                if last_at is None or (now - last_at).total_seconds() >= 1800:
+                    STATE["auto_tune_time"] = now
+                    try:
+                        app.auto_tune_all()
+                    except Exception:
+                        traceback.print_exc()
+
                 # v3.10 P2: 收盘后(15:05)抓取当日完整日线落库 + 定期清理(每天一次)
                 if now.time() >= datetime.time(15, 5) and STATE.get("daily_bars_date") != today:
                     STATE["daily_bars_date"] = today

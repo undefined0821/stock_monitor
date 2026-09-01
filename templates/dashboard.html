@@ -154,7 +154,7 @@ td:first-child,th:first-child{text-align:left}
     <div>浮动盈亏<b id="tp">--</b></div>
     <div>收益率<b id="tpp">--</b></div>
     <div>当日总盈亏<b id="td">--</b></div>
-    <div>板块强弱<b id="sb">--</b></div>
+    <div title="12个中证行业板块的平均涨跌幅，反映市场整体强弱">板块均涨<b id="sb">--</b></div>
   </div>
   <div class="grid" id="holdings"></div>
   <div class="card" id="pfEditor" style="display:none">
@@ -174,6 +174,7 @@ td:first-child,th:first-child{text-align:left}
     <div class="card"><h3>三大指数</h3><table id="idx"></table></div>
     <div class="card"><h3>题材涨跌（细分主线） <span class="code" id="sb2"></span></h3>
       <div id="sectors" style="max-height:300px;overflow:auto"></div>
+      <div id="sectorBoards"></div>
       <div class="note" id="bias"></div>
     </div>
     <div class="card" id="retailCard" style="border-color:var(--gold)"><h3>国证2000 小盘涨跌（散户代理）</h3><div id="retail"><div class="note">加载中…</div></div></div>
@@ -294,7 +295,9 @@ function render(d){
   const td=document.getElementById('td');
   td.textContent=showMoney?sign(d.total_day_pnl)+'元 ('+sign(d.total_day_pnl_pct)+'%)':'***';
   td.className=showMoney?cls(d.total_day_pnl):'masked';
-  document.getElementById('sb').textContent=d.sector_bias||'--';
+  const sbEl=document.getElementById('sb');
+  if(d.sector_avg!==undefined&&d.sector_avg!==null){sbEl.textContent=sign(d.sector_avg)+'%';sbEl.className=d.sector_avg>=0?'up':'down';}
+  else sbEl.textContent='--';
 
   // 异动提醒(置顶)
   const F=document.getElementById('feed');
@@ -353,9 +356,10 @@ function render(d){
     const pcd=cls(h.pct);     // 当日涨跌%: 以昨收为基准(独立于卡片主色)
     // 角落题材芯片: 所属细分题材名 + 题材平均涨跌幅 + 题材强弱排名(命中题材即自动显示)
     const secChip = h.theme_name ? `<span class="sector-chip" title="所属题材涨跌(成分股平均)">${h.theme_name} <span class="sp ${cls(h.theme_pct)}">${sign(h.theme_pct)}%</span>${h.theme_rank?'<span class="rk">'+h.theme_rank+'/'+(h.theme_total||'')+'</span>':''}</span>` : '';
+    const secBrChip = (h.sector_name && h.sector_pct!==null && h.sector_pct!==undefined) ? `<span class="sector-chip" title="所属板块(中证行业)今日涨跌幅">${h.sector_name} <span class="sp ${cls(h.sector_pct)}">${sign(h.sector_pct)}%</span></span>` : '';
     let badges=(h.anomalies||[]).map(a=>'<span class="badge b-'+a.level+'">'+a.text+'</span>').join('');
     H.innerHTML+=`<div class="card ${pc}">
-      <h3><span>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span>${secChip}</h3>
+      <h3><span>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span>${secChip}${secBrChip}</h3>
       <div style="margin:2px 0 4px"><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pcd}">${sign(h.pct)}%</span></div>
       <div class="grp">盈亏概览</div>
       <div class="row"><span class="lbl">持仓市值</span><span class="${showMoney?'':'masked'}">${mval(h.value)}</span></div>
@@ -384,6 +388,12 @@ function render(d){
   let s='';
   ths.forEach(x=>{const w=Math.min(Math.abs(x.pct)*6,100);s+=`<div style="margin:5px 0"><span style="display:inline-block;width:72px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span><span class="note" style="margin-left:4px">${x.n}股</span></div>`;});
   document.getElementById('sectors').innerHTML=s;
+  // 12 个中证行业板块涨跌榜(板块联动总览): 板块均涨的明细支撑
+  const secs=d.sectors||[];
+  let sbHtml='<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--row-line)"><div class="grp">板块涨跌（12 中证行业）</div>';
+  secs.forEach(x=>{sbHtml+='<div style="margin:4px 0;display:flex;justify-content:space-between;gap:8px"><span>'+x.name+'</span><span class="'+cls(x.pct)+'">'+sign(x.pct)+'%</span></div>';});
+  sbHtml+='</div>';
+  document.getElementById('sectorBoards').innerHTML=sbHtml;
   document.getElementById('bias').textContent=d.sector_bias;
   // 散户今日平均盈亏(国证2000近似) —— 紧凑版
   const rt=document.getElementById('retail');
@@ -501,8 +511,6 @@ function renderPredStats(s){
   const keys=Object.keys(PRED_LABELS).filter(k=>mods[k]);
   // v3.11.0: 顶部工具条(自动调参操作 + 门控说明)
   const head='<div class="gv-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">'
-    +'<button class="gv-btn" onclick="tuneNow(this)">🔧 重新调参</button>'
-    +'<button class="gv-btn" onclick="tuneReset()">↺ 恢复默认</button>'
     +`<span class="note" style="margin:0">自动调参随样本累积生效：阈值≥${tmeta.min_thr||15}，权重≥${tmeta.min_w||50}（权重多、需更多样本防过拟合）</span>`
     +'</div>';
   if(!keys.length){
@@ -565,8 +573,6 @@ function renderPredStats(s){
   if(anyBias) r+='<div class="note" style="margin-top:6px">提示: 偏差为"平均预测概率 − 实际命中率"。偏差>5pp 说明该模块概率过度自信，样本≥12 后可启用概率校准自动修正。</div>';
   box.innerHTML=head+r;
 }
-function tuneNow(b){if(b){b.disabled=true;b.textContent='⏳ 调参中…';} fetch('/api/tune',{method:'POST'}).then(()=>loadPredStats()).finally(()=>{if(b){b.disabled=false;b.textContent='🔧 重新调参';}});}
-function tuneReset(){fetch('/api/tune_reset',{method:'POST'}).then(()=>loadPredStats()).catch(()=>{});}
 function loadPredStats(){fetch('/api/pred_stats').then(r=>r.json()).then(renderPredStats).catch(()=>{});}
 function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();}
 function manual(t){

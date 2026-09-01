@@ -4,9 +4,72 @@
 import json, re, math, time, threading, datetime, os, random, traceback, copy
 from core import *
 import requests
-import app  # 延迟引用: optimize_gapup_weights 用到 app._WeightOverride / app.gap_up_score
+# 行情层(market_data 只依赖 core, 不反向依赖本模块, 直接导入安全)。
+# 本模块多处要用 fetch_tencent/parse_row 做实时兜底, 而 `from core import *` 并不含它们,
+# 不显式导入会在运行到实时兜底分支时 NameError。
+from market_data import fetch_tencent, parse_row
 
-__all__ = ['IDX_PRED_LOG_SEC', 'LIMITUP_HIT_PCT', 'PRED_MODULES', '_accumulate_stats', '_actual_any', '_actual_hit', '_add_trading_minutes', '_day_pct', '_day_pct_local', '_find_verify_target', '_gapup_auc', '_kline_bars_range', '_live_day_pct', '_live_next_day_return', '_load_gapup_log', '_load_pred_log', '_load_stats', '_next_day_return', '_next_day_return_local', '_next_trading_day', '_recompute_pred_stats', '_save_pred_log', '_save_stats', '_verdict_hit', '_verify_one_pred', 'detect_alerts', 'load_pred_stats', 'log_prediction', 'optimize_gapup_weights', 'verify_predictions']
+__all__ = ['IDX_PRED_LOG_SEC', 'LIMITUP_HIT_PCT', 'PRED_MODULES', '_accumulate_stats', '_actual_any', '_actual_hit', '_add_trading_minutes', '_day_pct', '_day_pct_local', '_find_verify_target', '_gapup_auc', '_kline_bars_range', '_live_day_pct', '_live_next_day_return', '_load_daily', '_load_gapup_log', '_load_pred_log', '_load_stats', '_next_day_return', '_next_day_return_local', '_next_trading_day', '_recompute_pred_stats', '_save_pred_log', '_save_stats', '_verdict_hit', '_verify_one_pred', 'detect_alerts', 'load_pred_stats', 'log_prediction', 'optimize_gapup_weights', 'verify_predictions']
+
+
+def _calib():
+    """延迟引用 calib 模块(只在函数体内 import)。
+
+    calib.py 顶层有 `from backtest import *`, 若本模块再在顶层 `import calib`
+    就构成循环导入(与 backtest↔app 同款问题), 故校准/调参相关的三个符号统一走
+    函数内延迟 import: fit_pred_calib / auto_tune_module / _apply_pred_calib。
+    """
+    import calib
+    return calib
+
+
+def _app():
+    """延迟引用 app 模块(只在函数体内 import)。
+
+    ⚠️ 切勿改回模块顶层 `import app`。app.py 顶层有 `from backtest import *`,
+    两者互引会在 `python app.py` 启动时形成循环导入:
+      1) __main__(app.py) 执行到 `from backtest import *` → backtest 开始加载;
+      2) backtest 顶层 `import app` → 系统里还没有 'app' → 再加载一份 app.py 副本;
+      3) 副本执行到 `from backtest import *` 时, backtest 还停在 import app 那一行,
+         连 __all__ 都还没定义 → 副本拿到的 backtest 命名空间是空的,
+         detect_alerts / verify_predictions / log_prediction / load_pred_stats
+         / PRED_MODULES 等全部丢失。
+      4) scheduler.py 的 `import app` 拿到的正是这份残缺副本, 于是
+         `app.detect_alerts(snap)` 每轮抛 AttributeError, 整个调度循环形同停摆:
+         STATE["idx_forecast"] 永不生成 → 上证指数分时图消失; 题材拉踩/盘前扫描/
+         尾盘预测/高开潜力/日线落库/预测回填 全部不再自动触发。
+    改为函数体内延迟 import, 循环被彻底打断(加载 backtest 时不再触碰 app)。
+    """
+    import app
+    return app
+
+
+def _load_daily():
+    """读取本地日线库, 返回按日期升序的记录列表 [{'date','ts','bars':{mktcode:{o,h,l,c,v,amt}}}]。
+
+    说明: 该数据源同时被回测层(本模块的 *_local 系列)与 app.py 的日线接口使用。
+    原先定义在 app.py, 但 app.py 顶层 `from backtest import *` 发生在本模块加载之后,
+    本模块拿不到 app 的名字, 运行到此处会 NameError。故下沉到本模块并加入 __all__,
+    由 app.py 星号导入复用, 两边共用一份实现。"""
+    out = []
+    if not os.path.exists(DAILY_BARS):
+        return out
+    try:
+        with open(DAILY_BARS, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    out.sort(key=lambda r: r.get("date", ""))
+    return out
+
+
 def _load_gapup_log():
     recs = []
     if os.path.exists(GAPUP_LOG):
@@ -218,8 +281,8 @@ def optimize_gapup_weights():
                      "amplitude": 0}
                 ctx = {"breadth": feat.get("breadth", 0.5), "retail_pct": feat.get("retail", 0),
                        "sector_avg": 0, "late": feat.get("idx_late", 0)}
-                with app._WeightOverride(weights):
-                    scores.append(app.gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
+                with _app()._WeightOverride(weights):
+                    scores.append(_app().gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
             auc = _gapup_auc(scores, ys)
             reg = sum(((weights[k] - base[k]) / base[k]) ** 2 for k in tune_keys)
             cal = (sum(scores) / len(scores) / 100.0 - gap_rate) ** 2  # 预测均值(0-1)对齐实际高开率
@@ -251,8 +314,8 @@ def optimize_gapup_weights():
                      "amplitude": 0}
                 ctx = {"breadth": feat.get("breadth", 0.5), "retail_pct": feat.get("retail", 0),
                        "sector_avg": 0, "late": feat.get("idx_late", 0)}
-                with app._WeightOverride(weights):
-                    scores.append(app.gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
+                with _app()._WeightOverride(weights):
+                    scores.append(_app().gap_up_score(d, ctx, late_pull=feat.get("late_pull", 0)))
             return _gapup_auc(scores, ys)
         auc_before = round(_auc_only(base), 4)
         auc_after = round(_auc_only(best), 4)
@@ -628,7 +691,7 @@ def verify_predictions():
             # v3.10.1: 每次回填后, 对各模块重拟合概率校准(达到样本阈值才生效, 否则原样通过)
             for m in PRED_MODULES:
                 try:
-                    cb = fit_pred_calib(m)
+                    cb = _calib().fit_pred_calib(m)
                     if cb.get("ok"):
                         print(f"[pred-calib] {m} A={cb['A']} B={cb['B']} n={cb['n']} "
                               f"预测均值={cb['pred_mean']}% 实际={cb['actual_rate']}%", flush=True)

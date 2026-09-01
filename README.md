@@ -43,12 +43,12 @@ nohup bash run.sh > monitor.log 2>&1 &
 
 | 版本 | 更新内容 |
 |------|----------|
+| **v3.11.11** | 板块均涨改造+板块联动补齐+题材库补全(甘咨询归工程咨询), 自动调参接入调度, 修None题材脏值 |
 | **v3.11.10** | 重构：抽 calib.py(校准/调参)；修拆分回归 _MINUTE_CACHE/_GAPUP_CALIB/_WeightOverride 缺失 |
 | **v3.11.9** | 重构：拆分 app.py 为 core/config/market_data/backtest/scheduler 五模块，缩体积、清循环依赖 |
 | **v3.11.8** | 修复调度器崩溃：/api/idx 把预测时间戳写成字符串，scheduler_loop 做时间减法 TypeError 死循环 |
 | **v3.11.7** | 修复上证1小时预测概率与方向自相矛盾（47%却判看涨）：阈值加护栏须>50、低置信度显示"观望"、校准样本门槛 12→30、前端三态着色 |
 | **v3.11.6** | 前端版本号同步(v3.11.6); 清理旧 bundle/旧 tar.gz 并重新打包 |
-| **v3.11.5** | 修复尾盘预测启动失败（FCONFIG 缺 `stk_*` 键 + 落盘 `ctx` 未定义）；`.prob` 数字改响应式 |
 
 ---
 
