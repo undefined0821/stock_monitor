@@ -483,34 +483,43 @@ def _backfill_themes():
     阶段一: 启动后最多 3 轮尝试补齐存量持仓(网络异常重试)。
     阶段二: 之后每 5 分钟扫描一次, 归类任何"新增但未归类"的持仓——
              覆盖前端保存时恰逢网络抖动导致未归类的情形, 确保最终自动出芯片。
-    仅处理既无 theme 字段、又不在手工 STOCK_THEMES 表的持仓。"""
+    仅处理既无 theme 字段、又不在手工 STOCK_THEMES 表的持仓。
+    关键修复: 直接基于内存 HOLDINGS 原地归类并 persist_holdings 落盘,
+    不再读取可能已过期的 portfolio.json 再整体写回, 避免与 /api/portfolio 保存
+    形成 read-modify-write 竞争、把用户刚改的持仓覆盖掉。"""
     import time
+
+    def _classify_once(use_cache):
+        # 先快照待归类持仓(不加锁), 网络归类后再原地写回(加锁), 缩短锁持有时间
+        with _HOLD_LOCK:
+            targets = [(h, str(h.get("code", "")).strip())
+                      for h in HOLDINGS
+                      if str(h.get("code", "")).strip()
+                      and not h.get("theme") and not STOCK_THEMES.get(str(h.get("code", "")).strip())]
+        if not targets:
+            return False
+        updates = {}
+        for h, code in targets:
+            try:
+                th = auto_classify(code, h.get("market"), h.get("name", ""), use_cache=use_cache)
+            except Exception:
+                th = None
+            if th:
+                updates[code] = th
+        if not updates:
+            return False
+        with _HOLD_LOCK:
+            for h in HOLDINGS:
+                c = str(h.get("code", "")).strip()
+                if c in updates:
+                    h["theme"] = updates[c]
+        persist_holdings()
+        return True
+
     # 阶段一: 启动补齐(重试)
     for attempt in range(3):
         try:
-            with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            hs = cfg.get("holdings", [])
-            changed = False
-            pending = False
-            for h in hs:
-                code = str(h.get("code", "")).strip()
-                if not code or h.get("theme") or STOCK_THEMES.get(code):
-                    continue
-                th = auto_classify(code, h.get("market"), h.get("name", ""),
-                                   use_cache=(attempt > 0))
-                if th:
-                    h["theme"] = th
-                    changed = True
-                else:
-                    pending = True
-            if changed:
-                tmp = PORTFOLIO_PATH + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, PORTFOLIO_PATH)
-                reload_holdings()
-            if not pending:
+            if not _classify_once(use_cache=(attempt > 0)):
                 break
             time.sleep(60)
         except Exception as e:
@@ -520,25 +529,7 @@ def _backfill_themes():
     while True:
         time.sleep(300)
         try:
-            with open(PORTFOLIO_PATH, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            hs = cfg.get("holdings", [])
-            changed = False
-            for h in hs:
-                code = str(h.get("code", "")).strip()
-                if not code or h.get("theme") or STOCK_THEMES.get(code):
-                    continue
-                th = auto_classify(code, h.get("market"), h.get("name", ""),
-                                   use_cache=False)
-                if th:
-                    h["theme"] = th
-                    changed = True
-            if changed:
-                tmp = PORTFOLIO_PATH + ".tmp"
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=2)
-                os.replace(tmp, PORTFOLIO_PATH)
-                reload_holdings()
+            _classify_once(use_cache=False)
         except Exception as e:
             print("[backfill] 周期扫描异常:", e)
 
@@ -1230,7 +1221,17 @@ def build_snapshot():
     tcodes = [(_market_prefix(c) + c).lower() for c in STOCK_THEMES]
     q = fetch_tencent(list(dict.fromkeys(hcodes + icodes + scodes + wcodes + tcodes)))
 
-    holdings = [enrich_holding(h, q) for h in HOLDINGS]
+    # 逐只 enriched, 单只异常不影响整体快照(避免一只持仓数据异常导致整页冻结、编辑不可见)
+    holdings = []
+    for h in HOLDINGS:
+        try:
+            holdings.append(enrich_holding(h, q))
+        except Exception as _e:
+            print("[snapshot] enrich_holding 跳过异常持仓 %s: %s" % (h.get("code"), _e))
+            try:
+                holdings.append(dict(h))
+            except Exception:
+                pass
     indices = []
     for c, nm in INDICES:
         d = parse_row(q.get(c.upper(), []))
@@ -2494,6 +2495,7 @@ def api_portfolio():
             cfg2 = json.load(f)
         with _HOLD_LOCK:
             HOLDINGS = _normalize_holdings(cfg2.get("holdings", []))
+        STATE["latest"] = None   # 强制下一轮 /api/snapshot 用新持仓重建, 编辑即时可见
         return jsonify({"ok": True, "count": len(HOLDINGS)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
