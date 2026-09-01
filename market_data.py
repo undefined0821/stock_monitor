@@ -3,6 +3,7 @@
 
 import json, re, math, time, threading, datetime, os, random, copy
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from core import *
 
 __all__ = ['UNIVERSE', '_fetch_chunk', '_fetch_kline', '_fetch_pool', '_tencent_session', 'fetch_minute', 'fetch_tencent', 'load_universe', 'parse_row']

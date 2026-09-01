@@ -15,7 +15,6 @@ from config import *  # 业务配置(板块/题材)
 from core import *    # 共享核心: BASE/STATE/FCONFIG/SCFG/全局常量/时间工具
 from market_data import *  # 行情数据层
 from backtest import *     # 预测回测闭环
-from scheduler import scheduler_loop  # 调度循环
 app = Flask(__name__)
 VERSION = "v3.11.9"
 
@@ -3139,10 +3138,11 @@ DASHBOARD_HTML = open(os.path.join(BASE, "templates", "dashboard.html"), encodin
 
 
 
-# 启动独立快扫线程(9:25:02-9:30期间, 每PREOPEN_FAST_SEC秒刷新Top30+重算AI)
-threading.Thread(target=_preopen_fast_loop, daemon=True).start()
 if __name__ == "__main__":
+    from scheduler import scheduler_loop  # 延迟导入, 避免与 scheduler 的 import app 形成循环导入
     _ensure_runtime_data()   # 兜底: 缺失的运行时数据文件用模板/基线初始化
+    # 启动独立快扫线程(9:25:02-9:30期间, 每PREOPEN_FAST_SEC秒刷新Top30+重算AI)
+    threading.Thread(target=_preopen_fast_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
     threading.Thread(target=_backfill_themes, daemon=True).start()  # 后台补齐存量持仓题材
     print(f"监控平台 v2 启动: http://localhost:{PORT}")

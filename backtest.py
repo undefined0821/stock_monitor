@@ -3,6 +3,7 @@
 
 import json, re, math, time, threading, datetime, os, random, copy
 from core import *
+import requests
 
 __all__ = ['IDX_PRED_LOG_SEC', 'LIMITUP_HIT_PCT', 'PRED_MODULES', '_accumulate_stats', '_actual_any', '_actual_hit', '_add_trading_minutes', '_day_pct', '_day_pct_local', '_find_verify_target', '_gapup_auc', '_kline_bars_range', '_live_day_pct', '_live_next_day_return', '_load_gapup_log', '_load_pred_log', '_load_stats', '_next_day_return', '_next_day_return_local', '_next_trading_day', '_recompute_pred_stats', '_save_pred_log', '_save_stats', '_verdict_hit', '_verify_one_pred', 'detect_alerts', 'load_pred_stats', 'log_prediction', 'optimize_gapup_weights', 'verify_predictions']
 def _load_gapup_log():
