@@ -23,7 +23,6 @@ nohup bash run.sh > monitor.log 2>&1 &   # 等价写法
 ```
 - 默认访问 http://localhost:8800 （端口可用环境变量 `PORT` 覆盖）。
 - 进程保活由 `watchdog.sh` / `keepalive.sh` 负责（沙箱环境每 10~20s 探活，失联自动拉起 app.py）。
-- 发布为在线应用后通过 WorkBuddy 分配的公网链接访问；重发同一目录链接不变。
 
 ## 关键点说明
 - **数据源**：腾讯财经实时行情 `qt.gtimg.cn`（真实数据，无需 token）。本沙箱东方财富/新浪被封；腾讯日线接口 `ifzq.gtimg.cn` 部分时段不稳定（501），故 v3.10 起**自建本地日线库**（每交易日 15:05 自采），回测优先走本地库。
@@ -50,7 +49,7 @@ nohup bash run.sh > monitor.log 2>&1 &   # 等价写法
 
 ---
 
-## ⚡ 性能基线（实测，沙箱 Ubuntu22.04 / Chromium / Python3.11）
+## ⚡ 性能基线（实测，Python 3.11）
 
 尾盘高开潜力（gapup）已从「约 4 分钟且易卡死」优化到「约 2 秒稳定出结果」：
 
@@ -62,6 +61,8 @@ nohup bash run.sh > monitor.log 2>&1 &   # 等价写法
 | 端到端 | ~4 分钟 + 卡死 | **~2 秒**（`done, 5 rows`） |
 
 > 优化点：行情抓取统一走 `fetch_tencent`，内部批量切分 + 线程池并发 + `requests.Session` 复用；全局共享线程池避免线程堆积；`/api/snapshot` 加超时保护防止接口挂起。**本地 AI 精修因沙箱环境不稳定已默认关闭**，如需恢复，配置远程 AI API 即可启用远程精修。
+
+选股池每日扫描经全主板日线库预热后改读本地库（零网络），日常数秒级出结果；首扫或本地库覆盖不足时回退在线抓取，约数分钟。
 
 ## 目录结构
 
@@ -90,19 +91,18 @@ stock_monitor/
 
 运行时数据（前端实时编辑 / 服务累积生成，已从 git 忽略）：`portfolio.json`、`gapup_log.jsonl`、`gapup_stats.json`、`gapup_weights_tuned.json`、`gapup_calib.json`、`pred_log.jsonl`、`pred_stats.json`、`daily_bars.jsonl`，模板为 `portfolio.json.example`。
 
-**发布流程（WorkBuddy「发布为应用」）**：
+**发布流程（关键防护：先同步线上数据再发布）**：
 
-- 重发同一本地目录会复用同一公网链接，链接不变；仅首次发布生成新链接。
 - 发布前必须先同步线上持仓，避免用本地旧数据顶掉用户在前端改的最新持仓：
   1. `GET /api/portfolio` 拉取线上完整持仓（含 `buy_date` / 阈值等）；
   2. 仅以线上 `holdings` 覆盖本地 `portfolio.json`，顶层字段（owner / settings / closed_positions / watchlist 等）保留本地值；
   3. 发布后再次 `GET` 校验，不一致则用备份 `POST` 还原。
-- 线上持仓备份放在项目外（`.workbuddy/`），避免被部署包一起带走而失去备份意义。
+- 线上持仓备份放在项目外独立目录（勿随部署包一起带走，否则失去备份意义）。
 
 严禁以下操作（会拿陈旧基线顶掉线上用户数据）：
 - ❌ `git checkout -- portfolio.json` / `git commit -A`（会恢复或提交陈旧持仓）
 - ❌ 未先同步线上持仓就直接整目录发布（本地旧文件会顶掉线上）
 
-> 沙箱内部 `deploy.sh` 仍保留「拉取线上数据 → 发布」的等价封装，但推送 GitHub 默认关闭（沙箱禁对外请求），源码请以本地仓库提交后推送；`/api/portfolio` GET 返回完整持仓（含 `buy_date`）便于忠实同步还原。
+> `deploy.sh` 为发布包装脚本：先拉取线上运行时数据（持仓/回测）写回本地，再调用发布，避免用陈旧基线覆盖用户改动；推送 GitHub 默认关闭（沙箱禁对外请求），源码请以本地仓库提交后推送。`/api/portfolio` GET 返回完整持仓（含 `buy_date`）便于忠实同步还原。
 
 > 本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，**不构成投资建议**。
