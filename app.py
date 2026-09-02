@@ -11,6 +11,7 @@
 from flask import Flask, Response, jsonify, request
 import requests
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy, sys
+from concurrent.futures import ThreadPoolExecutor
 
 # 以 `python app.py` 直接启动时, 本文件以 __main__ 身份执行; 而 scheduler.py / backtest.py
 # 里的 `import app` 会再加载一份同名副本。两份副本各自持有一套模块级状态, 会造成两个问题:
@@ -2205,6 +2206,201 @@ def get_daily_bars(code, days=60):
     return out
 
 
+# ----------------------------- 选股池(v3.11.13) -----------------------------
+# 每日定时(默认 14:30)全市场扫描主板, 严格按用户给定条件筛选:
+#   (1) 过去 lookback(5) 根K线中, 至少 below_need(4) 根满足 MA短(3日线) < MA长(7日线)
+#       —— 即前期均线被压制/粘合在下方;
+#   (2) 当根 MA短 从下往上上穿 MA长(前一根 MA短<MA长, 且当根 MA短>=MA长)。
+#   加分项: SKDJ 的 K 落在 20 左右(默认 15~25) 且 K 向上金叉 D -> 显著加分, 优先推荐。
+#   输出: 按分数降序取 TopN(默认3), 含 名称/代码/题材/分数; 无满足项时 rows 为空(前端显示"无")。
+
+def _ma(vals, n):
+    """简单移动平均; 数据不足返回 None。"""
+    if len(vals) < n or n <= 0:
+        return None
+    return sum(vals[-n:]) / float(n)
+
+
+def _skdj_series(bars, n=9, m1=3, m2=3):
+    """SKDJ(慢速随机指标)的 K/D 序列, 与 bars 等长; 前置不足处填 None。
+
+    RSV = (C - LLV(L,n)) / (HHV(H,n) - LLV(L,n)) * 100   (区间为0时取 50 中值)
+    K   = ((m1-1)*K_prev + RSV) / m1
+    D   = ((m2-1)*D_prev + K)   / m2
+    初值 K=D=50(行业惯例)。
+    """
+    ks, ds = [], []
+    k_prev, d_prev = 50.0, 50.0
+    for i in range(len(bars)):
+        if i + 1 < n:
+            ks.append(None); ds.append(None); continue
+        win = bars[i + 1 - n:i + 1]
+        try:
+            hh = max(b["high"] for b in win)
+            ll = min(b["low"] for b in win)
+        except (KeyError, TypeError):
+            ks.append(None); ds.append(None); continue
+        rng = hh - ll
+        rsv = 50.0 if rng <= 0 else (bars[i]["close"] - ll) / rng * 100.0
+        k_prev = ((m1 - 1) * k_prev + rsv) / float(m1)
+        d_prev = ((m2 - 1) * d_prev + k_prev) / float(m2)
+        ks.append(k_prev); ds.append(d_prev)
+    return ks, ds
+
+
+def _pool_theme(code, name):
+    """本地解析题材, 全程不发起网络请求(全市场扫描若逐股联网会慢到不可用)。
+    优先级: STOCK_THEMES 静态表 > 名称关键词 match_theme > 已缓存的分类结果。
+    统一返回【字符串】(无则空串) —— STOCK_THEMES 的值是列表, 需取首个, 否则前端会渲染成 ["白酒"]。"""
+    t = STOCK_THEMES.get(str(code))
+    if t:
+        return t[0] if isinstance(t, (list, tuple)) else str(t)
+    t = match_theme(name or "")
+    if t:
+        return t[0] if isinstance(t, (list, tuple)) else str(t)
+    try:
+        c = load_classify_cache().get(str(code)) or {}
+        th = c.get("theme") or ""
+        return th[0] if isinstance(th, (list, tuple)) else str(th)
+    except Exception:
+        return ""
+
+
+def _pool_eval(bars, code, name, price, pct):
+    """按选股池条件评估单只股票。返回 (是否命中, 详情dict|None)。"""
+    p = PCFG
+    ns, nl = int(p["ma_short"]), int(p["ma_long"])
+    look, need = int(p["lookback"]), int(p["below_need"])
+    closes = [b["close"] for b in bars]
+    # 至少需要: 窗口(look) + 当根 + 前一根, 且当根能算出 MA长 -> look + nl + 1
+    if len(closes) < look + nl + 1:
+        return False, None
+    ma_s, ma_l = [], []
+    for i in range(len(closes)):
+        ma_s.append(_ma(closes[:i + 1], ns))
+        ma_l.append(_ma(closes[:i + 1], nl))
+    i = len(closes) - 1                      # 当根(最新)索引
+    if None in (ma_s[i], ma_l[i], ma_s[i - 1], ma_l[i - 1]):
+        return False, None
+    # 条件(2): 当根从下往上上穿 —— 前一根 MA短<MA长, 当根 MA短>=MA长
+    if not (ma_s[i - 1] < ma_l[i - 1] and ma_s[i] >= ma_l[i]):
+        return False, None
+    # 条件(1): 当根之前的 look 根里, 至少 need 根 MA短 在 MA长 下方
+    below = sum(1 for j in range(i - look, i)
+                if ma_s[j] is not None and ma_l[j] is not None and ma_s[j] < ma_l[j])
+    if below < need:
+        return False, None
+    # ---- SKDJ ----
+    ks, ds = _skdj_series(bars, int(p["skdj_n"]), int(p["skdj_m1"]), int(p["skdj_m2"]))
+    k, d = ks[i], ds[i]
+    kp, dp = ks[i - 1], ds[i - 1]
+    cross = (None not in (k, d, kp, dp) and kp <= dp and k > d)
+    near = (k is not None and float(p["skdj_low"]) <= k <= float(p["skdj_high"]))
+    # ---- 打分(越高越靠前) ----
+    score = 0.0
+    spread = ((ma_s[i] - ma_l[i]) / ma_l[i] * 100.0) if ma_l[i] else 0.0
+    score += min(max(spread, 0.0) * float(p["w_cross"]), float(p["w_cross_cap"]))
+    if cross and near:                       # SKDJ 低位金叉: 主加分, 越贴近20越高
+        score += float(p["w_skdj_cross"]) + max(0.0, 5.0 - abs(k - 20.0)) * 2.0
+    elif cross:                              # 金叉但 K 不在低位区间
+        score += float(p["w_skdj_other_cross"])
+    elif near:                               # K 在低位但未金叉
+        score += float(p["w_skdj_near"])
+    score += (below - need) * float(p["w_extra_below"])   # 压制越充分略加分
+    return True, {
+        "code": code, "name": name, "theme": _pool_theme(code, name),
+        "market": _market_prefix(code) or "sh",
+        "price": round(price, 2) if price else None,
+        "pct": round(pct, 2) if pct is not None else None,
+        "score": round(score, 1),
+        "ma_short": round(ma_s[i], 3), "ma_long": round(ma_l[i], 3),
+        "spread_pct": round(spread, 3), "below_bars": below,
+        "skdj_k": None if k is None else round(k, 1),
+        "skdj_d": None if d is None else round(d, 1),
+        "skdj_cross": bool(cross), "skdj_low": bool(near),
+    }
+
+
+def _build_stock_pool(force=False):
+    """后台全市场扫描主板, 产出选股池 TopN, 写入 STATE['stock_pool']。
+
+    两阶段: 先批量拉实时行情做轻量预筛(剔除停牌/无有效价), 再并发抓日K算指标,
+    避免对全市场(数千只)盲目逐只抓K线。全程在后台线程执行, 不阻塞调度循环。
+    """
+    with LOCK:
+        if STATE.get("stock_pool_scanning"):
+            return
+        STATE["stock_pool_scanning"] = True
+    t0 = time.time()
+    try:
+        today = beijing_now().strftime("%Y-%m-%d")
+        p = PCFG
+        uni = _prefilter_universe()          # 主板(排除持仓/自选/ST)
+        codes = list(uni.keys())
+        # 阶段1: 批量实时行情预筛
+        # 注意: 腾讯行情接口大小写敏感 —— 请求必须传小写代码(大写会返回 v_pnone_match 无效响应),
+        # 而 fetch_tencent 返回的 key 是大写, 故查表时要 .upper()
+        qmap = {(_market_prefix(c) + c).lower(): c for c in codes}
+        quotes = fetch_tencent(list(qmap.keys()))
+        cands = []
+        for qk, c in qmap.items():
+            row = quotes.get(qk.upper()) or quotes.get(qk)
+            if not row:
+                continue
+            d = parse_row(row)
+            if d["price"] <= 0:              # 停牌/无有效价
+                continue
+            amt = (num(d.get("amount_wan")) or 0) * 10000
+            if p.get("min_amount") and amt < float(p["min_amount"]):
+                continue
+            cands.append((c, uni[c], d["price"], d["pct"], amt))
+        if p.get("max_scan") and len(cands) > int(p["max_scan"]):
+            cands.sort(key=lambda x: -(x[4] or 0))
+            cands = cands[:int(p["max_scan"])]
+
+        # 阶段2: 并发抓日K(含当根)并评估
+        min_bars = int(p["lookback"]) + int(p["ma_long"]) + 1
+        bars_n = max(int(p["bars"]), min_bars + 2)
+
+        def _work(item):
+            c, nm, pr, pctv, _amt = item
+            try:
+                bars = _fetch_kline(c, days=bars_n, include_today=True)
+                if len(bars) < min_bars:
+                    return None
+                ok, info = _pool_eval(bars, c, nm, pr, pctv)
+                return info if ok else None
+            except Exception:
+                return None
+
+        hits = []
+        workers = max(1, int(p["workers"]))
+        if cands:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="pool") as ex:
+                for info in ex.map(_work, cands):
+                    if info:
+                        hits.append(info)
+        hits.sort(key=lambda x: -x["score"])
+        top = hits[:max(1, int(p["top_n"]))]
+        with LOCK:
+            STATE["stock_pool"] = {
+                "date": today,
+                "time": beijing_now().strftime("%H:%M:%S"),
+                "rows": top,
+                "scanned": len(cands),
+                "matched": len(hits),
+                "note": (f"主板扫描 {len(cands)} 只 · 命中 {len(hits)} 只 · "
+                         f"取分数最高 {len(top)} 只"),
+                "seconds": round(time.time() - t0, 1),
+            }
+            STATE["stock_pool_date"] = today
+    except Exception:
+        traceback.print_exc()
+    finally:
+        with LOCK:
+            STATE["stock_pool_scanning"] = False
+
+
 # 休眠窗口策略(用户授权): 每日 16:00–次日 09:00 允许沙箱平台自动休眠以省资源。
 # 唤醒由平台在收到用户新指令时自动完成(无需额外操作)。本调度器在非交易时段不主动
 # 保持连接/不做重活(各预测模块仅在交易时段触发), 不会阻止平台休眠。
@@ -2282,6 +2478,20 @@ def api_idx():
         cur = STATE["idx_forecast"]
     return jsonify(_calib_idx_view(cur) if cur else {"building": True,
                                     "note": "上证预测计算中(含AI模型融合), 请稍候自动更新…"})
+
+
+@app.route("/api/stock_pool")
+def api_stock_pool():
+    """v3.11.13 选股池: ?rescan=1 后台强制重新扫描(全市场主板, 约1~3分钟)。"""
+    if request.args.get("rescan") in ("1", "true"):
+        threading.Thread(target=_build_stock_pool, kwargs={"force": True}, daemon=True).start()
+    with LOCK:
+        cur = STATE.get("stock_pool")
+    if cur:
+        return jsonify(cur)
+    return jsonify({"date": None, "rows": [], "scanned": 0, "matched": 0,
+                    "scanning": bool(STATE.get("stock_pool_scanning")),
+                    "note": "尚未扫描（每交易日 14:30 自动执行，可点「立即扫描」）"})
 
 
 @app.route("/api/pred_stats")

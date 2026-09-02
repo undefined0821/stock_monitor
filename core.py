@@ -3,7 +3,7 @@
 由 app.py 拆分而来, 各子模块用 `from core import *` 引入, 避免循环依赖。"""
 
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
-__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
+__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +85,37 @@ _SCAN_DEFAULTS = {
     "yao_smallcap_thresh": 30, "yao_smallcap_bonus": 5.0,
 }
 SCFG = {**_SCAN_DEFAULTS, **SCAN}                        # 生效的扫描配置(默认合并用户覆盖)
+
+# ---- 选股池(v3.11.13): 每日定时全市场扫描主板, 找出
+#      「过去N根K线里有M根 MA短 在 MA长 下方(前期充分粘合/压制)
+#        + 当根 MA短 从下往上上穿 MA长」的标的;
+#      若同时出现 SKDJ 的 K≈20 且向上金叉 D, 则加分并优先推荐。
+#      默认阈值可被 portfolio.json 的 settings.stock_pool 覆盖。
+_POOL_DEFAULTS = {
+    "scan_hhmm": "14:30",            # 每日自动扫描时刻
+    "top_n": 3,                      # 推荐数量
+    "ma_short": 3,                   # 短期均线(3日线)
+    "ma_long": 7,                    # 长期均线(7日线)
+    "lookback": 5,                   # 「过去N根K线」窗口(不含当根)
+    "below_need": 4,                 # 窗口内至少 N 根 MA短 < MA长
+    "skdj_n": 9,                     # SKDJ 的 RSV 周期
+    "skdj_m1": 3,                    # K 的平滑周期
+    "skdj_m2": 3,                    # D 的平滑周期
+    "skdj_low": 15.0,                # K「20左右」区间下界
+    "skdj_high": 25.0,               # K「20左右」区间上界
+    "w_cross": 25.0,                 # 上穿强度分 = spread% * w_cross(再取上限)
+    "w_cross_cap": 30.0,             # 上穿强度分上限
+    "w_skdj_cross": 40.0,            # SKDJ 低位(≈20)金叉: 主加分
+    "w_skdj_near": 8.0,              # K 在低位区间但未金叉
+    "w_skdj_other_cross": 10.0,      # 金叉但 K 不在低位区间
+    "w_extra_below": 3.0,            # 窗口内「MA短在下方」根数超过 below_need 的额外加分(每根)
+    "workers": 24,                   # 并发抓取日K的线程数
+    "bars": 30,                      # 每只抓取的日K根数(需覆盖 MA长+窗口+SKDJ 预热)
+    "max_scan": 0,                   # 最多扫描只数(0=全部主板, 按成交额降序截断)
+    "min_amount": 0,                 # 最低成交额(元)预筛, 0=不筛
+}
+POOL = SET.get("stock_pool", {})
+PCFG = {**_POOL_DEFAULTS, **POOL}                        # 生效的选股池配置
 # 预测模块可调权重(默认值, 可被 portfolio.json 的 settings.forecast 覆盖)
 # v2.8: 三个预测模块统一引入 宽度/尾盘动向/小盘情绪 多因子 + 置信度校准
 _FORECAST_DEFAULTS = {
@@ -154,6 +185,8 @@ STATE = {
     # v3.10: 预测回测闭环 + 本地日线库
     "gapup_verify_date": None, "pred_verify_time": None,
     "idx_predlog_time": None, "daily_bars_date": None,
+    # v3.11.13: 选股池(每日定时扫描主板 MA上穿+SKDJ低位金叉)
+    "stock_pool": None, "stock_pool_date": None, "stock_pool_scanning": False,
 }
 
 def beijing_now():

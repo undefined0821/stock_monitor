@@ -185,11 +185,9 @@ td:first-child,th:first-child{text-align:left}
       <div id="sectors" style="max-height:300px;overflow:auto"></div>
       <div id="sectorBoards"></div>
       <div class="note" id="bias"></div>
+      <div class="note" id="devSummary"></div>
     </div>
     <div class="card" id="retailCard" style="border-color:var(--gold)"><h3>国证2000 小盘涨跌（散户代理）</h3><div id="retail"><div class="note">加载中…</div></div></div>
-    <div class="card" id="driversCard"><h3>主题材拉/踩指数 <span class="code">每10分钟检测</span></h3><div id="drivers"><div class="note">加载中…</div></div>
-      <button onclick="manual('drivers')" style="margin-top:8px;background:var(--blue);color:#06121f;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px">立即检测</button>
-    </div>
   </div>
 
   <!-- 6. 尾盘预测 -->
@@ -209,6 +207,15 @@ td:first-child,th:first-child{text-align:left}
     <span id="gapupTip" class="code">点击立即全市场扫描主板，约需 1~3 分钟</span>
   </div>
   <div class="card" id="gapup"><div class="note">尚未生成（交易日 14:52 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
+
+  <!-- 7.5 选股池(v3.11.13): 每日14:30全市场扫描主板, MA3上穿MA7 + SKDJ低位金叉加分 -->
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <span>🎯 选股池（每日 14:30 全市场扫描）</span>
+    <span class="code">主板 · 过去5根有4根 MA3&lt;MA7 · 当根 MA3 上穿 MA7 · SKDJ 的 K≈20 且金叉 D 加分</span>
+    <button id="poolBtn" onclick="manual('stock_pool')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto">🔍 立即扫描</button>
+    <span id="poolTip" class="code">点击立即全市场扫描主板，约需 1~3 分钟</span>
+  </div>
+  <div class="card" id="stockpool"><div class="note">加载中…</div></div>
   <!-- 7. 回测面板(v3.11.1): 高开回测 与 预测回测总览 并排 -->
   <div class="gv-twocol" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
     <div class="gv-col">
@@ -394,12 +401,34 @@ function render(d){
   (d.indices||[]).forEach(i=>{it+=`<tr><td>${i.name}</td><td>${fmt(i.price)}</td><td class="${cls(i.pct)}">${sign(i.pct)}%</td></tr>`;});
   document.getElementById('idx').innerHTML=it;
   // 题材(细分)涨跌: 取代宽泛的 12 个中证行业, 更贴近个股关联主线
+  // v3.11.13: 原「主题材拉/踩指数」与本卡同源(同一份 themes 数据), 题材名重复出现,
+  // 故合并 —— 每个题材附「相对上证偏离」标记, 卡片底部给一句拉/踩摘要, 不再单列一张卡。
   const ths=d.themes||[];
   const tavg=ths.length?ths.reduce((a,b)=>a+b.pct,0)/ths.length:0;
   document.getElementById('sb2').textContent='↑'+ths.filter(x=>x.pct>0).length+' ↓'+ths.filter(x=>x.pct<0).length+' 均值'+sign(Math.round(tavg*100)/100)+'%';
+  // 相对上证偏离度(拉/踩判定基准)
+  const _sh=(d.indices||[]).find(i=>i.code==='sh000001');
+  const _base=_sh?_sh.pct:0;
+  const DEV_TH=0.8;   // 偏离≥0.8个百分点视为明显拉动/压制
+  const devs=ths.map(x=>({name:x.name,dev:Math.round((x.pct-_base)*100)/100}));
+  const pullers=devs.filter(x=>x.dev>=DEV_TH).sort((a,b)=>b.dev-a.dev).slice(0,3);
+  const pressers=devs.filter(x=>x.dev<=-DEV_TH).sort((a,b)=>a.dev-b.dev).slice(0,3);
   let s='';
-  ths.forEach(x=>{const w=Math.min(Math.abs(x.pct)*6,100);s+=`<div style="margin:5px 0"><span style="display:inline-block;width:72px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span><span class="note" style="margin-left:4px">${x.n}股</span></div>`;});
+  ths.forEach(x=>{
+    const w=Math.min(Math.abs(x.pct)*6,100);
+    const dv=Math.round((x.pct-_base)*100)/100;
+    const dvTag=Math.abs(dv)>=DEV_TH
+      ? `<span class="${dv>=0?'up':'down'}" style="margin-left:4px;font-size:11px" title="相对上证偏离 ${dv>0?'+':''}${dv} 个百分点">${dv>=0?'▲':'▼'}${dv>0?'+':''}${dv}</span>` : '';
+    s+=`<div style="margin:5px 0"><span style="display:inline-block;width:72px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span>${dvTag}<span class="note" style="margin-left:4px">${x.n}股</span></div>`;
+  });
   document.getElementById('sectors').innerHTML=s;
+  // 拉/踩摘要(替代原独立卡片)
+  const dsum=document.getElementById('devSummary');
+  if(dsum){
+    const pTxt=pullers.length?pullers.map(x=>`<b class="up">${x.name} +${x.dev}</b>`).join(' '):'<span class="note">无</span>';
+    const qTxt=pressers.length?pressers.map(x=>`<b class="down">${x.name} ${x.dev}</b>`).join(' '):'<span class="note">无</span>';
+    dsum.innerHTML=`相对上证(${sign(_base)}%)：🟢拉 ${pTxt} ｜ 🔴踩 ${qTxt}<br><span style="opacity:.7">偏离≥${DEV_TH}个百分点视为明显拉动/压制</span>`;
+  }
   // 12 个中证行业板块涨跌榜(板块联动总览): 板块均涨的明细支撑
   const secs=d.sectors||[];
   let sbHtml='<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--row-line)"><div class="grp">板块涨跌（12 中证行业）</div>';
@@ -417,16 +446,6 @@ function render(d){
     </div>
     <div class="note">以国证2000(小盘股)当日涨跌幅近似散户平均盈亏, 仅供参考</div>`;
   } else rt.innerHTML='<div class="note">散户平均盈亏数据未获取</div>';
-  // 主题材拉/踩指数
-  const dv=document.getElementById('drivers');
-  if(d.sector_drivers){const dd=d.sector_drivers;
-    const pull=(dd.pullers&&dd.pullers.length)?dd.pullers.map(s=>`<span class="badge b-up">▲ ${s.name} ${sign(s.pct)}% ·偏离+${fmt(s.dev)}%</span>`).join(' '):'<span class="badge b-muted">暂无明显拉动板块</span>';
-    const pres=(dd.pressers&&dd.pressers.length)?dd.pressers.map(s=>`<span class="badge b-down">▼ ${s.name} ${sign(s.pct)}% ·偏离${fmt(s.dev)}%</span>`).join(' '):'<span class="badge b-muted">暂无明显压制板块</span>';
-    dv.innerHTML=`<div class="note">${dd.index_name} ${sign(dd.index_pct)}% ｜ ${dd.move} ｜ ${dd.time} 更新</div>
-      <div style="margin:8px 0"><b class="up">🟢 拉指数</b><br>${pull}</div>
-      <div style="margin:8px 0"><b class="down">🔴 踩指数</b><br>${pres}</div>
-      <div class="note">${dd.note}</div>`;
-  } else dv.innerHTML='<div class="note">暂未检测(9:15后每10分钟更新, 可点按钮立即检测)</div>';
   // 尾盘
   if(d.close){let r=`<div class="note">${d.close.time} 生成 ｜ ${d.close.note}${d.close.ai_used?' ｜ <b style="color:var(--info)">AI模型已参与</b>':''}</div>`;
     const m=d.close.market;
@@ -588,7 +607,7 @@ function renderPredStats(s){
   box.innerHTML=head+r;
 }
 function loadPredStats(){fetch('/api/pred_stats').then(r=>r.json()).then(renderPredStats).catch(()=>{});}
-function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();}
+function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();loadStockPool();}
 function manual(t){
   if(t==='close'){
     const b=document.getElementById('closeRefreshBtn');
@@ -612,8 +631,49 @@ function manual(t){
           if(tip)tip.textContent='点击立即全市场扫描主板，约需 1~3 分钟';},800);
       }).catch(()=>{if(b){b.disabled=false;b.style.opacity=1;b.textContent='🎯 立即检测';}});
     }
+  }else if(t==='stock_pool'){
+    const b=document.getElementById('poolBtn');
+    const tip=document.getElementById('poolTip');
+    if(b&&!b.disabled){
+      b.disabled=true;b.style.opacity=.6;b.textContent='⏳ 扫描中…';
+      if(tip)tip.textContent='正在全市场扫描主板（约需 1~3 分钟），请稍候自动更新…';
+      fetch('/api/stock_pool?rescan=1').then(r=>r.json()).then(()=>{
+        setTimeout(()=>{loadStockPool();if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}
+          if(tip)tip.textContent='点击立即全市场扫描主板，约需 1~3 分钟';},800);
+      }).catch(()=>{if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}});
+    }
   }else{fetch('/api/'+t).then(r=>r.json()).then(()=>load());}
 }
+
+// ---- 选股池(v3.11.13) ----
+function renderStockPool(p){
+  const box=document.getElementById('stockpool');
+  if(!box) return;
+  if(!p){box.innerHTML='<div class="note">加载中…</div>';return;}
+  const rows=p.rows||[];
+  let r=`<div class="note">${p.note||''}${p.date?`（${p.date} ${p.time||''}${p.seconds!=null?' · 耗时'+p.seconds+'s':''}）`:''}</div>`;
+  if(!rows.length){
+    // 用户要求: 今日没有推荐就写"无"
+    r+=`<div style="margin-top:8px"><b>今日推荐：无</b></div>`
+      +`<div class="note">今日全市场扫描未发现同时满足「过去5根有4根 MA3 在 MA7 下方」且「当根 MA3 上穿 MA7」的主板标的。</div>`;
+    box.innerHTML=r;return;
+  }
+  r+='<table><tr><th>#</th><th>名称</th><th>代码</th><th>题材</th><th>现价</th><th>当日%</th>'
+    +'<th>MA3</th><th>MA7</th><th>分数</th><th>SKDJ</th></tr>';
+  rows.forEach((x,i)=>{
+    const sk=(x.skdj_k==null||x.skdj_k===undefined)
+      ?'--':('K '+x.skdj_k+' / D '+x.skdj_d+(x.skdj_cross?' <b class="up">金叉</b>':''));
+    r+=`<tr><td>${i+1}</td><td>${x.name}</td><td>${x.code}</td><td>${x.theme||'—'}</td>`
+      +`<td>${x.price==null?'--':fmt(x.price)}</td>`
+      +`<td class="${cls(x.pct)}">${x.pct==null?'--':sign(x.pct)+'%'}</td>`
+      +`<td>${x.ma_short}</td><td>${x.ma_long}</td>`
+      +`<td><b>${x.score}</b></td>`
+      +`<td>${sk}</td></tr>`;
+  });
+  r+='</table>';
+  box.innerHTML=r;
+}
+function loadStockPool(){fetch('/api/stock_pool').then(r=>r.json()).then(renderStockPool).catch(()=>{});}
 // ---- 持仓前端编辑(仅 code/cost/shares, 保存走 /api/portfolio) ----
 let editing=false, pfEdit=[];
 function enterEdit(){
