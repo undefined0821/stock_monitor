@@ -208,12 +208,12 @@ td:first-child,th:first-child{text-align:left}
   </div>
   <div class="card" id="gapup"><div class="note">尚未生成（交易日 14:52 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
 
-  <!-- 7.5 选股池(v3.11.13): 每日14:30全市场扫描主板, MA3上穿MA7 + SKDJ低位金叉加分 -->
+  <!-- 7.5 选股池(v3.12): 每日全市场扫描主板(策略已加密, 前端不展示细节) -->
   <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span>🎯 选股池（每日 14:30 全市场扫描）</span>
-    <span class="code">主板 · 过去5根有4根 MA3&lt;MA7 · 当根 MA3 上穿 MA7 · SKDJ 的 K≈20 且金叉 D 加分</span>
+    <span>🎯 选股池（每日全市场扫描）</span>
+    <span class="code">主板 · 综合均线形态 + 随机指标择时打分（策略加密）</span>
     <button id="poolBtn" onclick="manual('stock_pool')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto">🔍 立即扫描</button>
-    <span id="poolTip" class="code">点击立即全市场扫描主板，约需 1~3 分钟</span>
+    <span id="poolTip" class="code">点击立即全市场扫描主板（已预热本地日线库，数秒出结果）</span>
   </div>
   <div class="card" id="stockpool"><div class="note">加载中…</div></div>
   <!-- 7. 回测面板(v3.11.1): 高开回测 与 预测回测总览 并排 -->
@@ -419,7 +419,7 @@ function render(d){
     const dv=Math.round((x.pct-_base)*100)/100;
     const dvTag=Math.abs(dv)>=DEV_TH
       ? `<span class="${dv>=0?'up':'down'}" style="margin-left:4px;font-size:11px" title="相对上证偏离 ${dv>0?'+':''}${dv} 个百分点">${dv>=0?'▲':'▼'}${dv>0?'+':''}${dv}</span>` : '';
-    s+=`<div style="margin:5px 0"><span style="display:inline-block;width:72px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span>${dvTag}<span class="note" style="margin-left:4px">${x.n}股</span></div>`;
+    s+=`<div style="margin:5px 0"><span title="${x.name}" style="display:inline-block;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span>${dvTag}<span class="note" style="margin-left:4px">${x.n}股</span></div>`;
   });
   document.getElementById('sectors').innerHTML=s;
   // 拉/踩摘要(替代原独立卡片)
@@ -662,9 +662,20 @@ function renderStockPool(p){
   if(!box) return;
   if(!p){box.innerHTML='<div class="note">加载中…</div>';return;}
   const rows=p.rows||[];
-  // 扫描进行中: 显示进度, 不显示"无"
+  // 扫描进行中: 显示实时进度条, 不显示"无"
   if(p.scanning){
-    box.innerHTML='<div class="note">⏳ 正在全市场扫描主板（约 1~3 分钟），完成后自动显示推荐结果…</div>';
+    const done=Math.max(0,Math.min(p.total_live||0, p.scanned_live||0));
+    const tot=p.total_live||0;
+    const pct = tot>0 ? Math.max(2, Math.round(done/tot*100)) : 0;
+    const lbl = tot>0 ? `已扫描 <b>${done}</b> / ${tot} 只（${pct}%）` : '正在准备全市场扫描…';
+    box.innerHTML =
+      '<div class="note">⏳ 全市场主板扫描中，完成后自动显示推荐结果…</div>'
+      +'<div style="margin-top:10px">'
+      +  '<div style="height:14px;background:var(--line);border-radius:7px;overflow:hidden">'
+      +    `<div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--blue),#3aa0ff);border-radius:7px;transition:width .4s ease"></div>`
+      +  '</div>'
+      +  `<div style="margin-top:6px;font-size:12px;color:var(--mut)">${lbl}</div>`
+      +'</div>';
     return;
   }
   // 今日尚未到 14:30, 还未扫描: 提示自动时间, 不显示"无"
@@ -676,20 +687,20 @@ function renderStockPool(p){
   if(!rows.length){
     // 已扫描但无命中: 才是真正的"无"
     r+=`<div style="margin-top:8px"><b>今日推荐：无</b></div>`
-      +`<div class="note">今日全市场扫描未发现同时满足「过去5根有4根 MA3 在 MA7 下方」且「当根 MA3 上穿 MA7」的主板标的。</div>`;
+      +`<div class="note">今日全市场扫描未发现符合当前选股条件的标的。</div>`;
     box.innerHTML=r;return;
   }
   r+='<table><tr><th>#</th><th>名称</th><th>代码</th><th>题材</th><th>现价</th><th>当日%</th>'
-    +'<th>MA3</th><th>MA7</th><th>分数</th><th>SKDJ</th></tr>';
+    +'<th>均线形态</th><th>择时</th><th>分数</th></tr>';
   rows.forEach((x,i)=>{
     const sk=(x.skdj_k==null||x.skdj_k===undefined)
       ?'--':('K '+x.skdj_k+' / D '+x.skdj_d+(x.skdj_cross?' <b class="up">金叉</b>':''));
     r+=`<tr><td>${i+1}</td><td>${x.name}</td><td>${x.code}</td><td>${x.theme||'—'}</td>`
       +`<td>${x.price==null?'--':fmt(x.price)}</td>`
       +`<td class="${cls(x.pct)}">${x.pct==null?'--':sign(x.pct)+'%'}</td>`
-      +`<td>${x.ma_short}</td><td>${x.ma_long}</td>`
-      +`<td><b>${x.score}</b></td>`
-      +`<td>${sk}</td></tr>`;
+      +`<td>${x.ma_short} / ${x.ma_long}</td>`
+      +`<td>${sk}</td>`
+      +`<td><b>${x.score}</b></td></tr>`;
   });
   r+='</table>';
   box.innerHTML=r;

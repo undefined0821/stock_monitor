@@ -3,7 +3,7 @@
 由 app.py 拆分而来, 各子模块用 `from core import *` 引入, 避免循环依赖。"""
 
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
-__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
+__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'DAILY_WARMUP_DAYS', 'DAILY_WARMUP_WORKERS', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,8 +39,13 @@ MINUTE_CACHE_TTL = 30         # 分时数据缓存秒数(一次抓取供多处�
 # v3.10: 本地日线库(自建历史K线, 突破"沙箱无历史数据"限制)
 DAILY_BARS = f"{BASE}/daily_bars.jsonl"   # 每行一条 {code,date,open,high,low,close,vol,...}
 DAILY_KEEP_DAYS = 250         # 日线保留天数(约1年交易日), 超出自动清理
-DAILY_MAX_MB = 120            # 日线库文件大小上限(MB), 超限则清理最旧数据
+DAILY_MAX_MB = 400            # 日线库文件大小上限(MB), 超限则清理最旧数据
+                            # v3.12: 全主板(3151只)各保留 ~35 根日K供选股池零网络扫描,
+                            # 体积需覆盖 全主板×35天; 400MB 足够(实测约 200-300MB)。
 DAILY_UNIVERSE_LIMIT = 0      # 0=全市场; >0 则只存前N只(按代码序), 用于限制体积
+# v3.12: 选股池本地日线库预热参数
+DAILY_WARMUP_DAYS = 35        # 预热时每只股票抓取的历史K线根数(需覆盖 MA长+lookback+SKDJ 预热)
+DAILY_WARMUP_WORKERS = 60     # 预热并发抓取线程数(全主板 ~3151 只, 一次抓齐约1-2分钟)
 
 # v3.10: 通用预测回测闭环(上证1小时/尾盘大盘/尾盘个股/开盘前涨停)
 PRED_LOG = f"{BASE}/pred_log.jsonl"
@@ -92,7 +97,7 @@ SCFG = {**_SCAN_DEFAULTS, **SCAN}                        # 生效的扫描配置
 #      若同时出现 SKDJ 的 K≈20 且向上金叉 D, 则加分并优先推荐。
 #      默认阈值可被 portfolio.json 的 settings.stock_pool 覆盖。
 _POOL_DEFAULTS = {
-    "scan_hhmm": "14:30",            # 每日自动扫描时刻
+    "scan_hhmm": "13:30",            # 每日自动扫描时刻(v3.12: 提前到13:30, 收盘前留足交易时间)
     "top_n": 3,                      # 推荐数量
     "ma_short": 3,                   # 短期均线(3日线)
     "ma_long": 7,                    # 长期均线(7日线)
@@ -101,18 +106,19 @@ _POOL_DEFAULTS = {
     "skdj_n": 9,                     # SKDJ 的 RSV 周期
     "skdj_m1": 3,                    # K 的平滑周期
     "skdj_m2": 3,                    # D 的平滑周期
-    "skdj_low": 15.0,                # K「20左右」区间下界
-    "skdj_high": 25.0,               # K「20左右」区间上界
-    "w_cross": 25.0,                 # 上穿强度分 = spread% * w_cross(再取上限)
-    "w_cross_cap": 30.0,             # 上穿强度分上限
-    "w_skdj_cross": 40.0,            # SKDJ 低位(≈20)金叉: 主加分
-    "w_skdj_near": 8.0,              # K 在低位区间但未金叉
-    "w_skdj_other_cross": 10.0,      # 金叉但 K 不在低位区间
-    "w_extra_below": 3.0,            # 窗口内「MA短在下方」根数超过 below_need 的额外加分(每根)
+    # v3.12: 打分权重 w_* 与 SKDJ 低位区间 skdj_low/high 已内嵌进加密策略模块
+    # (strategy_pool.blob, 机密配方), 不在源码/配置明文出现。如需调参:
+    #   1) 改 strategy_pool.py 的 _SECRET_WEIGHTS
+    #   2) 运行 python build_strategy.py 重新加密
+    #   3) 删除明文 strategy_pool.py
     "workers": 24,                   # 并发抓取日K的线程数
     "bars": 30,                      # 每只抓取的日K根数(需覆盖 MA长+窗口+SKDJ 预热)
     "max_scan": 0,                   # 最多扫描只数(0=全部主板, 按成交额降序截断)
     "min_amount": 0,                 # 最低成交额(元)预筛, 0=不筛
+    # v3.12 提速预筛: 用实时行情直接砍掉明显不符标的, 减少需跑指标计算的数量
+    "pref_min_price": 5.0,           # 现价低于该值直接剔除(低价垃圾股, 极难满足均线上穿形态)
+    "pref_min_float_mv": 20.0,       # 流通市值(亿)低于该值直接剔除
+    "pref_min_amount": 20000000.0,   # 当日成交额(元)低于该值剔除(流动性差, 成交额小则量能不足)
 }
 POOL = SET.get("stock_pool", {})
 PCFG = {**_POOL_DEFAULTS, **POOL}                        # 生效的选股池配置
@@ -187,6 +193,8 @@ STATE = {
     "idx_predlog_time": None, "daily_bars_date": None,
     # v3.11.13: 选股池(每日定时扫描主板 MA上穿+SKDJ低位金叉)
     "stock_pool": None, "stock_pool_date": None, "stock_pool_scanning": False,
+    # v3.12: 全主板日线库预热状态(收盘后15:12触发, 每日一次)
+    "daily_warmup_date": None,
 }
 
 def beijing_now():

@@ -554,12 +554,16 @@ def _day_pct(code, date):
 def _next_day_return_local(code, pred_date):
     bars = [r for r in _load_daily() if (r.get("bars") or {}).get(code)]
     for i, b in enumerate(bars):
-        if b["date"] == pred_date and i + 1 < len(bars):
-            base = b["bars"][code]["c"]
-            c1 = bars[i + 1]["bars"][code]["c"]
-            if base and base > 0 and c1:
-                return {"ret": round((c1 - base) / base * 100, 3), "price": c1,
-                        "date": bars[i + 1]["date"], "src": "local"}
+        if b["date"] != pred_date or i + 1 >= len(bars):
+            continue
+        bb = (b.get("bars") or {}).get(code)
+        nb = (bars[i + 1].get("bars") or {}).get(code)
+        if not bb or not nb:
+            continue                        # 当日/次日该标的缺数据, 跳过多算(避免 KeyError 致整条回测失败)
+        base, c1 = bb.get("c"), nb.get("c")
+        if base and base > 0 and c1:
+            return {"ret": round((c1 - base) / base * 100, 3), "price": c1,
+                    "date": bars[i + 1]["date"], "src": "local"}
     return None
 
 
@@ -567,12 +571,16 @@ def _next_day_return_local(code, pred_date):
 def _day_pct_local(code, date):
     bars = [r for r in _load_daily() if (r.get("bars") or {}).get(code)]
     for i, b in enumerate(bars):
-        if b["date"] == date and i >= 1:
-            prev = bars[i - 1]["bars"][code]["c"]
-            c = b["bars"][code]["c"]
-            if prev and prev > 0 and c:
-                return {"ret": round((c - prev) / prev * 100, 3), "price": c,
-                        "date": date, "src": "local"}
+        if b["date"] != date or i < 1:
+            continue
+        pb = (bars[i - 1].get("bars") or {}).get(code)
+        cb = (b.get("bars") or {}).get(code)
+        if not pb or not cb:
+            continue
+        prev, c = pb.get("c"), cb.get("c")
+        if prev and prev > 0 and c:
+            return {"ret": round((c - prev) / prev * 100, 3), "price": c,
+                    "date": date, "src": "local"}
     return None
 
 

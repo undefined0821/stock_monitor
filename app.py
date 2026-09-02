@@ -30,8 +30,9 @@ from core import *    # 共享核心: BASE/STATE/FCONFIG/SCFG/全局常量/时�
 from market_data import *  # 行情数据层
 from backtest import *     # 预测回测闭环
 from calib import *     # 校准与调参(拆分自 app.py)
+from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 加密选股策略加载器
 app = Flask(__name__)
-VERSION = "v3.11.12"
+VERSION = "v3.11.13"   # 版本号由用户掌控, 本功能为 v3.11.13 下的持续优化(不自行递增)
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 
@@ -2110,6 +2111,12 @@ def _daily_universe():
             codes.append(_market_prefix(c["code"]) + c["code"])
     except Exception:
         pass
+    # v3.11.13: 选股池提速 —— 把全主板(剔除ST)纳入日线库, 选股池扫描直接读本地库(零网络),
+    # 不再逐只抓在线日K(3000+ 次 HTTP 请求是扫描慢的根因)。仅增加 15:05 落库成本, 体积<120MB 上限内。
+    try:
+        codes += [(_market_prefix(c) + c).lower() for c in _prefilter_universe()]
+    except Exception:
+        pass
     codes = [c.lower() for c in codes if c]
     codes = list(dict.fromkeys(codes))
     if DAILY_UNIVERSE_LIMIT and len(codes) > DAILY_UNIVERSE_LIMIT:
@@ -2182,6 +2189,97 @@ def capture_daily_bars():
         return {"ok": False, "reason": "异常", "trace": traceback.format_exc()}
 
 
+def _daily_merge_kline(day_vals):
+    """把 {date: {mktcode:{o,h,l,c,v}}} 合并进现有日线库(按日期增量更新)。
+    day_vals: 一批以日期为键、以 {mktcode: bar} 为值的记录。已存在的日期做字段合并, 新日期追加。"""
+    today_map = {}
+    for _d, _bmap in day_vals.items():
+        today_map.setdefault(_d, {}).update(_bmap)
+    recs = _load_daily()
+    rec_map = {r.get("date"): r for r in recs}
+    for _d, _bmap in today_map.items():
+        if not _bmap:
+            continue
+        if _d in rec_map:
+            rec_map[_d]["bars"].update(_bmap)
+        else:
+            rec_map[_d] = {"date": _d, "ts": beijing_now().strftime("%Y-%m-%d %H:%M:%S"),
+                           "bars": dict(_bmap)}
+    new_recs = sorted(rec_map.values(), key=lambda r: r.get("date", ""))
+    # 清理(与 capture_daily_bars 同款双阈值)
+    if len(new_recs) > DAILY_KEEP_DAYS:
+        new_recs = new_recs[len(new_recs) - DAILY_KEEP_DAYS:]
+    guard = 0
+    while _daily_size_mb(new_recs) > DAILY_MAX_MB and len(new_recs) > 30 and guard < 1000:
+        new_recs = new_recs[1:]
+        guard += 1
+    tmp = DAILY_BARS + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for r in new_recs:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, DAILY_BARS)
+    return new_recs
+
+
+def warmup_daily_library(force=False, codes=None, days=None, workers=None):
+    """v3.12: 全主板日线库预热 —— 选股池零网络扫描的前提。
+    背景: 选股扫描需每只股票最近 ~35 根日K(算 MA长+lookback+SKDJ), 而原日线库仅收录
+    持仓/自选/指数(几十只), 扫描时 ~3100 只全部回退在线 _fetch_kline, 逐只联网导致
+    结果拖到收盘后无法交易。本函数把全主板每只股票的最近 N 天日K一次性抓齐并合并进
+    daily_bars.jsonl, 之后选股扫描纯读本地(零网络), 数十秒出结果。
+    建议在收盘后(15:10 后)或服务首次启动时触发一次; 之后每日 capture_daily_bars 增量补当日。
+    """
+    try:
+        t0 = time.time()
+        days = int(days or DAILY_WARMUP_DAYS)
+        workers = max(4, int(workers or DAILY_WARMUP_WORKERS))
+        if not codes:
+            codes = list(_prefilter_universe().keys())
+        # 增量: 跳过本地日线库已覆盖的股票(避免每次全量重抓)
+        recs = _load_daily()
+        have = {}
+        for _r in recs[-2:]:                     # 只看最近2天确认该股在库
+            for _k in (_r.get("bars") or {}):
+                have.setdefault(_k, 0)
+        need = [c for c in codes if (_market_prefix(c) + c).lower() not in have]
+        done = len(codes) - len(need)
+        if not need:
+            return {"ok": True, "cached": done, "fetched": 0, "seconds": round(time.time() - t0, 1),
+                    "days": days, "note": "全部标的本地日线已就绪, 无需预热"}
+        results = {}
+        def _w(raw_code):
+            try:
+                # _fetch_kline 内部会用 _market_prefix 补前缀, 传原始代码即可
+                bs = _fetch_kline(raw_code, days=days, include_today=True)
+                if not bs:
+                    return raw_code, {}
+                bm = {}
+                for b in bs:
+                    bm[b["date"]] = {"o": b["open"], "h": b["high"], "l": b["low"],
+                                     "c": b["close"], "v": 0}
+                return raw_code, bm
+            except Exception:
+                return raw_code, {}
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="warm") as ex:
+            for _c, _bm in ex.map(_w, need):
+                if _bm:
+                    results.setdefault((_market_prefix(_c) + _c).lower(), _bm)
+        # 按日期重组: date -> {mktcode: bar}
+        by_day = {}
+        for _mc, _bm in results.items():
+            for _d, _bar in _bm.items():
+                by_day.setdefault(_d, {})[_mc] = _bar
+        _daily_merge_kline(by_day)
+        fetched = len(results)
+        print(f"[warmup] 预热完成: 抓取 {fetched} 只 ×{days}天, 已有 {done} 只跳过, "
+              f"耗时 {time.time() - t0:.1f}s, 库 {_daily_size_mb(_load_daily()):.1f}MB", flush=True)
+        return {"ok": True, "fetched": fetched, "cached": done, "total": len(codes),
+                "days": days, "seconds": round(time.time() - t0, 1)}
+    except Exception:
+        traceback.print_exc()
+        return {"ok": False, "reason": "异常", "trace": traceback.format_exc()}
+
+
 def daily_bars_info():
     recs = _load_daily()
     if not recs:
@@ -2206,47 +2304,10 @@ def get_daily_bars(code, days=60):
     return out
 
 
-# ----------------------------- 选股池(v3.11.13) -----------------------------
-# 每日定时(默认 14:30)全市场扫描主板, 严格按用户给定条件筛选:
-#   (1) 过去 lookback(5) 根K线中, 至少 below_need(4) 根满足 MA短(3日线) < MA长(7日线)
-#       —— 即前期均线被压制/粘合在下方;
-#   (2) 当根 MA短 从下往上上穿 MA长(前一根 MA短<MA长, 且当根 MA短>=MA长)。
-#   加分项: SKDJ 的 K 落在 20 左右(默认 15~25) 且 K 向上金叉 D -> 显著加分, 优先推荐。
-#   输出: 按分数降序取 TopN(默认3), 含 名称/代码/题材/分数; 无满足项时 rows 为空(前端显示"无")。
-
-def _ma(vals, n):
-    """简单移动平均; 数据不足返回 None。"""
-    if len(vals) < n or n <= 0:
-        return None
-    return sum(vals[-n:]) / float(n)
-
-
-def _skdj_series(bars, n=9, m1=3, m2=3):
-    """SKDJ(慢速随机指标)的 K/D 序列, 与 bars 等长; 前置不足处填 None。
-
-    RSV = (C - LLV(L,n)) / (HHV(H,n) - LLV(L,n)) * 100   (区间为0时取 50 中值)
-    K   = ((m1-1)*K_prev + RSV) / m1
-    D   = ((m2-1)*D_prev + K)   / m2
-    初值 K=D=50(行业惯例)。
-    """
-    ks, ds = [], []
-    k_prev, d_prev = 50.0, 50.0
-    for i in range(len(bars)):
-        if i + 1 < n:
-            ks.append(None); ds.append(None); continue
-        win = bars[i + 1 - n:i + 1]
-        try:
-            hh = max(b["high"] for b in win)
-            ll = min(b["low"] for b in win)
-        except (KeyError, TypeError):
-            ks.append(None); ds.append(None); continue
-        rng = hh - ll
-        rsv = 50.0 if rng <= 0 else (bars[i]["close"] - ll) / rng * 100.0
-        k_prev = ((m1 - 1) * k_prev + rsv) / float(m1)
-        d_prev = ((m2 - 1) * d_prev + k_prev) / float(m2)
-        ks.append(k_prev); ds.append(d_prev)
-    return ks, ds
-
+# ----------------------------- 选股池(v3.12) -----------------------------
+# 策略核心(MA上穿判定 / SKDJ低位金叉打分 / 权重阈值)已加密为 strategy_pool.blob,
+# 由 strategy_loader 运行时内存解密加载, 源码与前端均无明文策略。仅在此保留薄包装。
+# 题材解析(_pool_theme)属分类而非打分策略, 保留在本地(不联网)。
 
 def _pool_theme(code, name):
     """本地解析题材, 全程不发起网络请求(全市场扫描若逐股联网会慢到不可用)。
@@ -2266,60 +2327,34 @@ def _pool_theme(code, name):
         return ""
 
 
-def _pool_eval(bars, code, name, price, pct):
-    """按选股池条件评估单只股票。返回 (是否命中, 详情dict|None)。"""
-    p = PCFG
-    ns, nl = int(p["ma_short"]), int(p["ma_long"])
-    look, need = int(p["lookback"]), int(p["below_need"])
-    closes = [b["close"] for b in bars]
-    # 至少需要: 窗口(look) + 当根 + 前一根, 且当根能算出 MA长 -> look + nl + 1
-    if len(closes) < look + nl + 1:
-        return False, None
-    ma_s, ma_l = [], []
-    for i in range(len(closes)):
-        ma_s.append(_ma(closes[:i + 1], ns))
-        ma_l.append(_ma(closes[:i + 1], nl))
-    i = len(closes) - 1                      # 当根(最新)索引
-    if None in (ma_s[i], ma_l[i], ma_s[i - 1], ma_l[i - 1]):
-        return False, None
-    # 条件(2): 当根从下往上上穿 —— 前一根 MA短<MA长, 当根 MA短>=MA长
-    if not (ma_s[i - 1] < ma_l[i - 1] and ma_s[i] >= ma_l[i]):
-        return False, None
-    # 条件(1): 当根之前的 look 根里, 至少 need 根 MA短 在 MA长 下方
-    below = sum(1 for j in range(i - look, i)
-                if ma_s[j] is not None and ma_l[j] is not None and ma_s[j] < ma_l[j])
-    if below < need:
-        return False, None
-    # ---- SKDJ ----
-    ks, ds = _skdj_series(bars, int(p["skdj_n"]), int(p["skdj_m1"]), int(p["skdj_m2"]))
-    k, d = ks[i], ds[i]
-    kp, dp = ks[i - 1], ds[i - 1]
-    cross = (None not in (k, d, kp, dp) and kp <= dp and k > d)
-    near = (k is not None and float(p["skdj_low"]) <= k <= float(p["skdj_high"]))
-    # ---- 打分(越高越靠前) ----
-    score = 0.0
-    spread = ((ma_s[i] - ma_l[i]) / ma_l[i] * 100.0) if ma_l[i] else 0.0
-    score += min(max(spread, 0.0) * float(p["w_cross"]), float(p["w_cross_cap"]))
-    if cross and near:                       # SKDJ 低位金叉: 主加分, 越贴近20越高
-        score += float(p["w_skdj_cross"]) + max(0.0, 5.0 - abs(k - 20.0)) * 2.0
-    elif cross:                              # 金叉但 K 不在低位区间
-        score += float(p["w_skdj_other_cross"])
-    elif near:                               # K 在低位但未金叉
-        score += float(p["w_skdj_near"])
-    score += (below - need) * float(p["w_extra_below"])   # 压制越充分略加分
-    return True, {
-        "code": code, "name": name, "theme": _pool_theme(code, name),
-        "market": _market_prefix(code) or "sh",
-        "price": round(price, 2) if price else None,
-        "pct": round(pct, 2) if pct is not None else None,
-        "score": round(score, 1),
-        "ma_short": round(ma_s[i], 3), "ma_long": round(ma_l[i], 3),
-        "spread_pct": round(spread, 3), "below_bars": below,
-        "skdj_k": None if k is None else round(k, 1),
-        "skdj_d": None if d is None else round(d, 1),
-        "skdj_cross": bool(cross), "skdj_low": bool(near),
-    }
+# 从加密载荷加载策略(仅首次解密, 之后走缓存)。失败时返回 None, 调用方降级处理。
+_STRATEGY = None
+_STRATEGY_ERR = None
+def _get_strategy():
+    global _STRATEGY, _STRATEGY_ERR
+    if _STRATEGY is None and _STRATEGY_ERR is None:
+        try:
+            _STRATEGY = _load_pool_strategy()
+        except Exception as e:
+            _STRATEGY_ERR = str(e)
+    return _STRATEGY
 
+
+def _pool_eval(bars, code, name, price, pct):
+    """按加密策略评估单只股票。返回 (是否命中, 详情dict|None)。"""
+    st = _get_strategy()
+    if st is None:
+        return False, None                       # 策略不可用(缺blob/解密失败)时放弃该股
+    _ma_f, _skdj_f, _pe_f = st
+    theme = _pool_theme(code, name)
+    ok, info = _pe_f(bars, code, name, price, pct, PCFG, theme)
+    if ok and info is not None:
+        info["market"] = _market_prefix(code) or "sh"   # 市场前缀非机密, 由调用方补齐
+    return ok, info
+
+
+_POOL_DMAP = None          # v3.12: 选股池本地日线库内存缓存(code->bars), 文件未变则复用
+_POOL_DMAP_FILESZ = -1     # 缓存对应时的 daily_bars.jsonl 文件大小
 
 def _build_stock_pool(force=False):
     """后台全市场扫描主板, 产出选股池 TopN, 写入 STATE['stock_pool']。
@@ -2327,10 +2362,13 @@ def _build_stock_pool(force=False):
     两阶段: 先批量拉实时行情做轻量预筛(剔除停牌/无有效价), 再并发抓日K算指标,
     避免对全市场(数千只)盲目逐只抓K线。全程在后台线程执行, 不阻塞调度循环。
     """
+    global _POOL_DMAP, _POOL_DMAP_FILESZ
     with LOCK:
         if STATE.get("stock_pool_scanning"):
             return
         STATE["stock_pool_scanning"] = True
+        STATE["stock_pool_scanned"] = 0
+        STATE["stock_pool_total"] = 0
     t0 = time.time()
     try:
         today = beijing_now().strftime("%Y-%m-%d")
@@ -2353,26 +2391,103 @@ def _build_stock_pool(force=False):
             amt = (num(d.get("amount_wan")) or 0) * 10000
             if p.get("min_amount") and amt < float(p["min_amount"]):
                 continue
-            cands.append((c, uni[c], d["price"], d["pct"], amt))
+            # v3.12 提速预筛: 用实时行情直接砍掉明显不符标的(价低/市值小/成交额枯竭),
+            # 大幅减少需跑 MA/SKDJ 指标计算的股票数 —— 从 ~3100 只降到 ~600-1000 只。
+            if p.get("pref_min_price") and d["price"] < float(p["pref_min_price"]):
+                continue
+            if p.get("pref_min_float_mv"):
+                fmv = num(d.get("float_mv")) or 0
+                if fmv < float(p["pref_min_float_mv"]):
+                    continue
+            if p.get("pref_min_amount") and amt < float(p["pref_min_amount"]):
+                continue
+            # 保留整条实时行情 d(含开高低), 供阶段2补"当根(盘中)"K线, 避免再发网络请求
+            cands.append((c, uni[c], d, amt))
         if p.get("max_scan") and len(cands) > int(p["max_scan"]):
-            cands.sort(key=lambda x: -(x[4] or 0))
+            cands.sort(key=lambda x: -(x[3] or 0))
             cands = cands[:int(p["max_scan"])]
 
-        # 阶段2: 并发抓日K(含当根)并评估
+        # 阶段2: 并发评估。v3.11.13 提速: 一次性载入本地日线库到内存, 直接读本地(零网络);
+        # 仅当本地不足 min_bars 根时才回退在线 _fetch_kline。盘中"当根"那根用实时行情补全
+        # (与 _fetch_kline(include_today=True) 等价), 把 ~3000 次 HTTP 请求降为 0。
+        # v3.12 提速: 本地库文件未变时复用上次解析出的 {code: bars} 内存表(缓存),
+        # 避免每次扫描都重读 ~200MB 文件(读取+解析可省数秒)。
         min_bars = int(p["lookback"]) + int(p["ma_long"]) + 1
         bars_n = max(int(p["bars"]), min_bars + 2)
+        _dmap = None
+        try:
+            _fsz = os.path.getsize(DAILY_BARS)
+        except Exception:
+            _fsz = -1
+        if force or _fsz != _POOL_DMAP_FILESZ or _POOL_DMAP is None:
+            _dmap = {}
+            try:
+                for _r in _load_daily():
+                    _bs = _r.get("bars") or {}
+                    for _k, _bv in _bs.items():
+                        _dmap.setdefault(_k, []).append(
+                            {"date": _r["date"], "open": _bv.get("o"), "close": _bv.get("c"),
+                             "high": _bv.get("h"), "low": _bv.get("l")})
+                _POOL_DMAP = _dmap
+                _POOL_DMAP_FILESZ = _fsz
+            except Exception:
+                _dmap = {}
+        else:
+            _dmap = _POOL_DMAP
+
+        # v3.12: 若本地日线库尚未预热(主板块覆盖率低), 先同步补齐再扫描 —— 避免首次
+        # 扫描(服务刚部署/库刚清空)又退回逐只联网抓K线(那是慢到收盘后的根因)。
+        # 预热仅首次 ~1-2 分钟(全主板并发抓35天), 之后每日增量, 扫描全程零网络。
+        _coverage = sum(1 for c in codes if (_market_prefix(c) + c).lower() in _dmap)
+        _need_warm = _coverage < max(50, int(len(codes) * 0.6))
+        if _need_warm:
+            try:
+                print(f"[stock_pool] 本地日线库覆盖率 {_coverage}/{len(codes)}, 先预热再扫描…", flush=True)
+                warmup_daily_library(force=True, codes=codes, days=bars_n)
+                _dmap = {}
+                for _r in _load_daily():
+                    _bs = _r.get("bars") or {}
+                    for _k, _bv in _bs.items():
+                        _dmap.setdefault(_k, []).append(
+                            {"date": _r["date"], "open": _bv.get("o"), "close": _bv.get("c"),
+                             "high": _bv.get("h"), "low": _bv.get("l")})
+                _POOL_DMAP = _dmap
+                try:
+                    _POOL_DMAP_FILESZ = os.path.getsize(DAILY_BARS)
+                except Exception:
+                    _POOL_DMAP_FILESZ = -1
+            except Exception:
+                traceback.print_exc()
 
         def _work(item):
-            c, nm, pr, pctv, _amt = item
+            c, nm, d, _amt = item
             try:
-                bars = _fetch_kline(c, days=bars_n, include_today=True)
+                today = beijing_now().strftime("%Y-%m-%d")
+                key = (_market_prefix(c) + c).lower()
+                bars = (_dmap.get(key) or [])[-bars_n:]
+                if len(bars) < min_bars:
+                    bars = _fetch_kline(c, days=bars_n, include_today=True)   # 本地不足, 回退在线
+                else:
+                    # 用实时行情补"当根(盘中)"那根K线(本地库止于昨日, 尚未含今日)
+                    if not bars or bars[-1].get("date") != today:
+                        o, h, l, cl = d.get("open"), d.get("high"), d.get("low"), d.get("price")
+                        if o and h and l and cl and o > 0 and h > 0 and l > 0 and cl > 0:
+                            bars = bars + [{"date": today, "open": o, "high": h,
+                                            "low": l, "close": cl}]
+                        else:
+                            bars = _fetch_kline(c, days=bars_n, include_today=True)
                 if len(bars) < min_bars:
                     return None
-                ok, info = _pool_eval(bars, c, nm, pr, pctv)
+                ok, info = _pool_eval(bars, c, nm, d["price"], d["pct"])
                 return info if ok else None
             except Exception:
                 return None
 
+        # v3.11.13: 实时进度条 —— 扫描前写入总数, 每处理完一只原子自增已扫描数,
+        # 前端读 stock_pool_scanned/total 实时显示进度(此前计数仅完成时才写, 运行中恒为0)。
+        with LOCK:
+            STATE["stock_pool_total"] = len(cands)
+            STATE["stock_pool_scanned"] = 0
         hits = []
         workers = max(1, int(p["workers"]))
         if cands:
@@ -2380,6 +2495,8 @@ def _build_stock_pool(force=False):
                 for info in ex.map(_work, cands):
                     if info:
                         hits.append(info)
+                    with LOCK:
+                        STATE["stock_pool_scanned"] = STATE.get("stock_pool_scanned", 0) + 1
         hits.sort(key=lambda x: -x["score"])
         top = hits[:max(1, int(p["top_n"]))]
         # v3.11.13: TopN 题材补全 —— 仅对最终入围的命中股, 若本地题材为空则联网
@@ -2490,7 +2607,7 @@ def api_idx():
 
 @app.route("/api/stock_pool")
 def api_stock_pool():
-    """v3.11.13 选股池: ?rescan=1 后台强制重新扫描(全市场主板, 约1~3分钟)。"""
+    """v3.11.13 选股池: ?rescan=1 后台强制重新扫描(全市场主板, 读本地日线库约数秒)。"""
     if request.args.get("rescan") in ("1", "true"):
         threading.Thread(target=_build_stock_pool, kwargs={"force": True}, daemon=True).start()
     with LOCK:
@@ -2498,12 +2615,17 @@ def api_stock_pool():
     if cur:
         # v3.11.13: 注入实时 scanning 状态 —— 否则扫描中 STATE['stock_pool'] 仍是旧值(无该字段),
         # 前端轮询永远读不到"正在扫描", 表现为点击立即扫描毫无反应。
+        # v3.11.13: 一并注入实时进度(扫描中 scanned_live 逐只自增, 完成后与 scanned 一致)。
         cur = dict(cur)
         cur["scanning"] = bool(STATE.get("stock_pool_scanning"))
+        cur["scanned_live"] = STATE.get("stock_pool_scanned", 0)
+        cur["total_live"] = STATE.get("stock_pool_total", 0)
         return jsonify(cur)
     return jsonify({"date": None, "rows": [], "scanned": 0, "matched": 0,
                     "scanning": bool(STATE.get("stock_pool_scanning")),
-                    "note": "尚未扫描（每交易日 14:30 自动执行，可点「立即扫描」）"})
+                    "scanned_live": STATE.get("stock_pool_scanned", 0),
+                    "total_live": STATE.get("stock_pool_total", 0),
+                    "note": "尚未扫描（每交易日 13:30 自动执行，可点「立即扫描」）"})
 
 
 @app.route("/api/pred_stats")

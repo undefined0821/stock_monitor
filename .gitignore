@@ -3,6 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 
+# 机密: 选股策略明文源(禁止入库/部署)。仅提交加密产物 strategy_pool.blob 与加载器。
+# 修改策略后运行 python build_strategy.py 重新加密, 再删除本明文文件。
+strategy_pool.py
+build_strategy.py
+
 # 日志与临时文件
 *.log
 monitor.log

@@ -63,13 +63,14 @@ def scheduler_loop():
                             app._post_open_filter()
                         except Exception:
                             traceback.print_exc()
-                # 选股池(v3.11.13): 每日定时(默认14:30)全市场扫描主板
+                # 选股池(v3.11.13): 每日定时(默认14:30, v3.12 提前到13:30)全市场扫描主板
                 #   MA短(3)上穿MA长(7) + 前期压制充分 + SKDJ低位金叉加分, 取Top3。
-                #   全市场扫描较重(数千只抓日K), 放后台线程, 每交易日仅跑一次。
+                #   v3.12: 依赖本地日线库预热(见下方 warmup 触发), 扫描纯读本地零网络,
+                #   数秒~数十秒出结果, 确保收盘前(留足交易时间)拿到推荐。
                 try:
                     sp_from = _parse_hhmm(PCFG["scan_hhmm"])
                 except Exception:
-                    sp_from = datetime.time(14, 30)
+                    sp_from = datetime.time(13, 30)
                 if now.time() >= sp_from and STATE.get("stock_pool_date") != today:
                     STATE["stock_pool_date"] = today
                     threading.Thread(target=app._build_stock_pool, daemon=True).start()
@@ -110,6 +111,13 @@ def scheduler_loop():
                 if now.time() >= datetime.time(15, 5) and STATE.get("daily_bars_date") != today:
                     STATE["daily_bars_date"] = today
                     threading.Thread(target=app.capture_daily_bars, daemon=True).start()
+
+                # v3.12 P2: 收盘后(15:12)全主板日线库预热(选股池零网络扫描的前提)。
+                # 首次预热抓全主板 ~3151 只各35天日K(约1-2分钟, 后台线程);
+                # 之后每日增量: 预热只补当日缺口, 由 capture_daily_bars 已覆盖当日则跳过。
+                if now.time() >= datetime.time(15, 12) and STATE.get("daily_warmup_date") != today:
+                    STATE["daily_warmup_date"] = today
+                    threading.Thread(target=app.warmup_daily_library, daemon=True).start()
 
             if trading:
                 time.sleep(POLL)
