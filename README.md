@@ -18,11 +18,12 @@
 
 ## 启动
 ```bash
-bash run.sh          # 前台
-# 或后台常驻
-nohup bash run.sh > monitor.log 2>&1 &
+bash run.sh                 # 后台常驻(内部 python3.11 app.py)
+nohup bash run.sh > monitor.log 2>&1 &   # 等价写法
 ```
-访问 http://localhost:8800
+- 默认访问 http://localhost:8800 （端口可用环境变量 `PORT` 覆盖）。
+- 进程保活由 `watchdog.sh` / `keepalive.sh` 负责（沙箱环境每 10~20s 探活，失联自动拉起 app.py）。
+- 发布为在线应用后通过 WorkBuddy 分配的公网链接访问；重发同一目录链接不变。
 
 ## 关键点说明
 - **数据源**：腾讯财经实时行情 `qt.gtimg.cn`（真实数据，无需 token）。本沙箱东方财富/新浪被封；腾讯日线接口 `ifzq.gtimg.cn` 部分时段不稳定（501），故 v3.10 起**自建本地日线库**（每交易日 15:05 自采），回测优先走本地库。
@@ -66,32 +67,42 @@ nohup bash run.sh > monitor.log 2>&1 &
 
 ```
 stock_monitor/
-├── app.py                  # 主程序：Flask 服务 + 各预测模块 + 行情抓取
-├── run.sh                 # 前台启动脚本
-├── watchdog.sh            # 看门狗：保活 8800 端口上的服务
-├── build_static.py        # 生成自带数据的独立仪表盘 HTML
-├── build_static_quick.py  # 快速构建静态快照
-├── portfolio.json         # 持仓配置（改完重启生效）
-├── all_a_codes.json       # 全市场代码表
-├── dashboard_snapshot.html# 快照看板
-├── models/                # 本地 AI 模型（Qwen2.5 0.5B / 1.5B，当前未启用）
+├── app.py                  # Flask 主服务 + 路由 + 选股池调度
+├── core.py                 # 全局状态 / 配置默认 / 端口 / 日线库预热
+├── config.py               # 配置加载
+├── market_data.py          # 行情抓取与本地日线库读写
+├── backtest.py             # 预测回测与基线
+├── calib.py                # 概率校准与自动调参
+├── scheduler.py            # 定时任务(扫描 / 预热 / 抓日线)
+├── strategy_loader.py      # 选股逻辑运行时加载(与下方加密产物配合)
+├── strategy_pool.blob      # 选股逻辑加密封装产物(唯一部署的策略文件)
+├── run.sh / watchdog.sh / keepalive.sh   # 启动与保活脚本
+├── build_static.py / build_static_quick.py  # 生成自带数据的独立快照 HTML
+├── deploy.sh               # 沙箱内部发布包装(拉取线上数据防覆盖, 推送默认关闭)
+├── portfolio.json          # 持仓配置(运行时数据, git 忽略)
+├── all_a_codes.json        # 全市场代码表
+├── dashboard_snapshot.html # 快照看板
+├── models/                 # 本地 AI 模型(Qwen2.5 0.5B / 1.5B, 当前未启用)
 └── README.md
 ```
 
 ## ⚠️ 部署与数据保护（务必遵守）
 
-`portfolio.json`、`gapup_log.jsonl`、`gapup_stats.json`、`gapup_weights_tuned.json`、`gapup_calib.json`、`pred_log.jsonl`、`pred_stats.json`、`daily_bars.jsonl` 是**用户运行时数据**（前端实时编辑 / 服务累积生成），已从 git 忽略，模板为 `portfolio.json.example`。
+运行时数据（前端实时编辑 / 服务累积生成，已从 git 忽略）：`portfolio.json`、`gapup_log.jsonl`、`gapup_stats.json`、`gapup_weights_tuned.json`、`gapup_calib.json`、`pred_log.jsonl`、`pred_stats.json`、`daily_bars.jsonl`，模板为 `portfolio.json.example`。
 
-**发布必须用 `deploy.sh`，不要用 `publish.js` 直发：**
+**发布流程（WorkBuddy「发布为应用」）**：
 
-```bash
-bash deploy.sh   # 先拉取线上持仓/回测数据 → 再部署，避免覆盖前端改动
-```
+- 重发同一本地目录会复用同一公网链接，链接不变；仅首次发布生成新链接。
+- 发布前必须先同步线上持仓，避免用本地旧数据顶掉用户在前端改的最新持仓：
+  1. `GET /api/portfolio` 拉取线上完整持仓（含 `buy_date` / 阈值等）；
+  2. 仅以线上 `holdings` 覆盖本地 `portfolio.json`，顶层字段（owner / settings / closed_positions / watchlist 等）保留本地值；
+  3. 发布后再次 `GET` 校验，不一致则用备份 `POST` 还原。
+- 线上持仓备份放在项目外（`.workbuddy/`），避免被部署包一起带走而失去备份意义。
 
 严禁以下操作（会拿陈旧基线顶掉线上用户数据）：
 - ❌ `git checkout -- portfolio.json` / `git commit -A`（会恢复或提交陈旧持仓）
-- ❌ 直接 `node .../publish.js --dir .`（整目录覆盖式部署，本地旧文件会顶掉线上）
+- ❌ 未先同步线上持仓就直接整目录发布（本地旧文件会顶掉线上）
 
-`/api/portfolio` GET 返回完整持仓（含 `buy_date`），便于 `deploy.sh` 忠实同步还原；服务启动时若数据文件缺失会自动从 `portfolio.json.example` 初始化 / 播种回测基线。
+> 沙箱内部 `deploy.sh` 仍保留「拉取线上数据 → 发布」的等价封装，但推送 GitHub 默认关闭（沙箱禁对外请求），源码请以本地仓库提交后推送；`/api/portfolio` GET 返回完整持仓（含 `buy_date`）便于忠实同步还原。
 
 > 本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，**不构成投资建议**。
