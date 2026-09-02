@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
-"""选股策略加载器: 运行时从加密载荷 strategy_pool.blob 内存解密出策略源码并动态加载。
+"""选股策略加载器。
 
-- 策略明文(strategy_pool.py)不随服务部署, 只部署本 loader + 加密 blob;
-- 主密钥不以明文存放, 以"反转+XOR"混淆字节存储, 需逆向 loader 才能还原;
-- 解密后在进程内存里 exec, 暴露 ma / skdj_series / pool_eval 三个纯函数。
-
-依赖: 仅标准库(zlib/hashlib/hmac), 跨平台可移植, 无第三方依赖。
+- 策略源以受保护形式存放于数据文件, 运行时载入并导出 ma / skdj_series / pool_eval 三个纯函数;
+- 主密钥不以明文存放, 需逆向本模块才能还原;
+- 仅依赖 Python 标准库, 跨平台可移植。
 """
-import os, zlib, hashlib, hmac
+import os, zlib as _c, hashlib as _h, hmac as _m
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOB = os.path.join(HERE, "strategy_pool.blob")
 
-# ---- 混淆后的主密钥字节(反转 + 与位置计数器XOR)。勿明文外泄。 ----
+# ---- 受保护的主密钥数据(勿外泄)。 ----
 _ENC_KEY_HEX = ("4764324277304264394f68384463385864294063205960254274234a642a553c"
                 "16131211641717091b5f07524b485a4e4245411e585a594715525954484e135d37")
 _SALT = b"strategy-pool::loader-v1"
@@ -26,38 +24,38 @@ def _recover_key():
     return rev[::-1]
 
 
-def _derive_key():
-    return hmac.new(_recover_key(), _SALT, hashlib.sha256).digest()
+def _derive():
+    return _m.new(_recover_key(), _SALT, _h.sha256).digest()
 
 
-def _keystream(key, length):
+def _stream(key, length):
     out = b""
     ctr = 0
     while len(out) < length:
-        out += hashlib.sha256(key + ctr.to_bytes(8, "big")).digest()
+        out += _h.sha256(key + ctr.to_bytes(8, "big")).digest()
         ctr += 1
     return out[:length]
 
 
-def _decrypt_blob():
+def _unpack():
     if not os.path.exists(BLOB):
         return None
     blob = open(BLOB, "rb").read()
-    key = _derive_key()
-    ks = _keystream(key, len(blob))
+    key = _derive()
+    ks = _stream(key, len(blob))
     comp = bytes(a ^ b for a, b in zip(blob, ks))
     try:
-        return zlib.decompress(comp)
+        return _c.decompress(comp)
     except Exception:
         return None
 
 
 def load():
-    """返回 (ma, skdj_series, pool_eval); 解密失败时回退 None 表示策略不可用。"""
+    """返回 (ma, skdj_series, pool_eval); 载入失败回退 None。"""
     global _cache
     if _cache is not None:
         return _cache
-    src = _decrypt_blob()
+    src = _unpack()
     if not src:
         _cache = None
         return None

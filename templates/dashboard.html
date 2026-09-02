@@ -678,9 +678,9 @@ function renderStockPool(p){
       +'</div>';
     return;
   }
-  // 今日尚未到 14:30, 还未扫描: 提示自动时间, 不显示"无"
+  // 今日尚未到 14:25, 还未扫描: 提示自动时间, 不显示"无"
   if(!p.date){
-    box.innerHTML='<div class="note">尚未扫描：每个交易日 <b>14:30</b> 自动执行全市场扫描，到点刷新本页即可查看；或点「立即扫描」。</div>';
+    box.innerHTML='<div class="note">尚未扫描：每个交易日 <b>14:25</b> 自动执行全市场扫描，到点刷新本页即可查看；或点「立即扫描」。</div>';
     return;
   }
   let r=`<div class="note">${p.note||''}（${p.date} ${p.time||''}${p.seconds!=null?' · 耗时'+p.seconds+'s':''}）</div>`;

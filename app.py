@@ -2625,7 +2625,7 @@ def api_stock_pool():
                     "scanning": bool(STATE.get("stock_pool_scanning")),
                     "scanned_live": STATE.get("stock_pool_scanned", 0),
                     "total_live": STATE.get("stock_pool_total", 0),
-                    "note": "尚未扫描（每交易日 13:30 自动执行，可点「立即扫描」）"})
+                    "note": "尚未扫描（每交易日 14:25 自动执行，可点「立即扫描」）"})
 
 
 @app.route("/api/pred_stats")

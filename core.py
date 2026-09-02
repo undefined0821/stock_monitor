@@ -97,7 +97,7 @@ SCFG = {**_SCAN_DEFAULTS, **SCAN}                        # 生效的扫描配置
 #      若同时出现 SKDJ 的 K≈20 且向上金叉 D, 则加分并优先推荐。
 #      默认阈值可被 portfolio.json 的 settings.stock_pool 覆盖。
 _POOL_DEFAULTS = {
-    "scan_hhmm": "13:30",            # 每日自动扫描时刻(v3.12: 提前到13:30, 收盘前留足交易时间)
+    "scan_hhmm": "14:25",            # 每日自动扫描时刻(收盘前35分钟, 留足尾盘交易时间)
     "top_n": 3,                      # 推荐数量
     "ma_short": 3,                   # 短期均线(3日线)
     "ma_long": 7,                    # 长期均线(7日线)

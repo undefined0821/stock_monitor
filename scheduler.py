@@ -63,14 +63,14 @@ def scheduler_loop():
                             app._post_open_filter()
                         except Exception:
                             traceback.print_exc()
-                # 选股池(v3.11.13): 每日定时(默认14:30, v3.12 提前到13:30)全市场扫描主板
+                # 选股池(v3.11.13): 每日定时(默认14:25)全市场扫描主板
                 #   MA短(3)上穿MA长(7) + 前期压制充分 + SKDJ低位金叉加分, 取Top3。
                 #   v3.12: 依赖本地日线库预热(见下方 warmup 触发), 扫描纯读本地零网络,
                 #   数秒~数十秒出结果, 确保收盘前(留足交易时间)拿到推荐。
                 try:
                     sp_from = _parse_hhmm(PCFG["scan_hhmm"])
                 except Exception:
-                    sp_from = datetime.time(13, 30)
+                    sp_from = datetime.time(14, 25)
                 if now.time() >= sp_from and STATE.get("stock_pool_date") != today:
                     STATE["stock_pool_date"] = today
                     threading.Thread(target=app._build_stock_pool, daemon=True).start()
