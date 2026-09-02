@@ -2382,6 +2382,14 @@ def _build_stock_pool(force=False):
                         hits.append(info)
         hits.sort(key=lambda x: -x["score"])
         top = hits[:max(1, int(p["top_n"]))]
+        # v3.11.13: TopN 题材补全 —— 仅对最终入围的命中股, 若本地题材为空则联网
+        # (东方财富行业+名称自动识别)补全; 只 N 只, 快且写缓存, 不影响全市场扫描热路径。
+        for x in top:
+            if not x.get("theme"):
+                try:
+                    x["theme"] = auto_classify(x["code"], x.get("market"), x.get("name")) or ""
+                except Exception:
+                    pass
         with LOCK:
             STATE["stock_pool"] = {
                 "date": today,
