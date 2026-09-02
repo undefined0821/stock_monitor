@@ -2238,10 +2238,13 @@ def warmup_daily_library(force=False, codes=None, days=None, workers=None):
         # 增量: 跳过本地日线库已覆盖的股票(避免每次全量重抓)
         recs = _load_daily()
         have = {}
-        for _r in recs[-2:]:                     # 只看最近2天确认该股在库
+        for _r in recs:
             for _k in (_r.get("bars") or {}):
-                have.setdefault(_k, 0)
-        need = [c for c in codes if (_market_prefix(c) + c).lower() not in have]
+                have[_k] = have.get(_k, 0) + 1
+        # v3.11.14: 判定由「代码在库」改为「根数足够」—— 原逻辑只看最后 2 条记录里该代码
+        # 是否出现, 于是每日增量 capture 写进来的标的(各仅数根)会被误判为已就绪而跳过
+        # 预热, 扫描时每只都因根数不足回退逐只联网抓日K(全市场数分钟)。
+        need = [c for c in codes if have.get((_market_prefix(c) + c).lower(), 0) < days]
         done = len(codes) - len(need)
         if not need:
             return {"ok": True, "cached": done, "fetched": 0, "seconds": round(time.time() - t0, 1),
@@ -2438,7 +2441,10 @@ def _build_stock_pool(force=False):
         # v3.12: 若本地日线库尚未预热(主板块覆盖率低), 先同步补齐再扫描 —— 避免首次
         # 扫描(服务刚部署/库刚清空)又退回逐只联网抓K线(那是慢到收盘后的根因)。
         # 预热仅首次 ~1-2 分钟(全主板并发抓35天), 之后每日增量, 扫描全程零网络。
-        _coverage = sum(1 for c in codes if (_market_prefix(c) + c).lower() in _dmap)
+        # v3.11.14: 覆盖率按「根数满足判定所需」统计, 而非「代码是否出现」—— 否则库里
+        # 每只仅数根时也被算作已覆盖, 永不触发预热, 扫描全程回退在线抓取。
+        _coverage = sum(1 for c in codes
+                        if len(_dmap.get((_market_prefix(c) + c).lower()) or []) >= min_bars)
         _need_warm = _coverage < max(50, int(len(codes) * 0.6))
         if _need_warm:
             try:

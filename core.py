@@ -3,7 +3,7 @@
 由 app.py 拆分而来, 各子模块用 `from core import *` 引入, 避免循环依赖。"""
 
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
-__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'DAILY_WARMUP_DAYS', 'DAILY_WARMUP_WORKERS', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
+__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'DAILY_WARMUP_DAYS', 'DAILY_WARMUP_WORKERS', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'KLINE_RPS', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_rate_limit', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +40,34 @@ MINUTE_CACHE_TTL = 30         # 分时数据缓存秒数(一次抓取供多处�
 DAILY_BARS = f"{BASE}/daily_bars.jsonl"   # 每行一条 {code,date,open,high,low,close,vol,...}
 DAILY_KEEP_DAYS = 250         # 日线保留天数(约1年交易日), 超出自动清理
 DAILY_MAX_MB = 400            # 日线库文件大小上限(MB), 超限则清理最旧数据
+
+# v3.11.14: 日K在线抓取全局限速(次/秒)。实测高频突发会触发上游风控: 腾讯返回 501
+# (WAF 拦截页)、东财直接 reset 连接, 表现为批量抓取全空 -> 扫描零命中, 比慢更糟。
+# 稳态扫描读本地库(零网络), 仅首次预热或本地缺数回退时才批量抓, 限速把请求拉平。
+KLINE_RPS = 25
+_RATE_LOCK = threading.Lock()
+_RATE_NEXT = [0.0]            # 下次允许发起请求的时刻(monotonic), 用列表承载以免 global
+
+def _rate_limit(rps=None):
+    """全局限速: 把并发的在线抓取在时间上摊平, 避免突发打爆上游风控。
+
+    各调用方串行过锁领取"下次可用时刻"后各自 sleep, 等价于一个全局令牌桶。
+    rps<=0 表示不限速。单次预热约 3000 只, 25 次/秒约 2 分钟, 与预热耗时同量级。
+    """
+    try:
+        rps = float(rps if rps is not None else KLINE_RPS)
+    except Exception:
+        rps = 0.0
+    if rps <= 0:
+        return
+    with _RATE_LOCK:
+        now = time.monotonic()
+        gap = 1.0 / rps
+        start = now if _RATE_NEXT[0] <= now else _RATE_NEXT[0]
+        _RATE_NEXT[0] = start + gap
+        wait = start - now
+    if wait > 0:
+        time.sleep(wait)
                             # v3.12: 全主板(3151只)各保留 ~35 根日K供选股池零网络扫描,
                             # 体积需覆盖 全主板×35天; 400MB 足够(实测约 200-300MB)。
 DAILY_UNIVERSE_LIMIT = 0      # 0=全市场; >0 则只存前N只(按代码序), 用于限制体积
@@ -105,7 +133,7 @@ _POOL_DEFAULTS = {
     "n_smooth1": 3,                  # 辅助指标平滑参数1
     "n_smooth2": 3,                  # 辅助指标平滑参数2
     # 打分权重等机密参数已内嵌进受保护模块, 不在源码/配置明文出现
-    "workers": 24,                   # 并发抓取日K的线程数
+    "workers": 32,                   # 并发抓取日K的线程数(受 KLINE_RPS 全局限速约束, 过高只增风控风险)
     "bars": 30,                      # 每只抓取的日K根数(需覆盖全部历史计算所需窗口)
     "max_scan": 0,                   # 最多扫描只数(0=全部主板, 按成交额降序截断)
     "min_amount": 0,                 # 最低成交额(元)预筛, 0=不筛
