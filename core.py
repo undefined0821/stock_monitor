@@ -44,7 +44,7 @@ DAILY_MAX_MB = 400            # 日线库文件大小上限(MB), 超限则清理
                             # 体积需覆盖 全主板×35天; 400MB 足够(实测约 200-300MB)。
 DAILY_UNIVERSE_LIMIT = 0      # 0=全市场; >0 则只存前N只(按代码序), 用于限制体积
 # v3.12: 选股池本地日线库预热参数
-DAILY_WARMUP_DAYS = 35        # 预热时每只股票抓取的历史K线根数(需覆盖 MA长+lookback+SKDJ 预热)
+DAILY_WARMUP_DAYS = 35        # 预热时每只股票抓取的历史K线根数(需覆盖全部历史计算所需窗口)
 DAILY_WARMUP_WORKERS = 60     # 预热并发抓取线程数(全主板 ~3151 只, 一次抓齐约1-2分钟)
 
 # v3.10: 通用预测回测闭环(上证1小时/尾盘大盘/尾盘个股/开盘前涨停)
@@ -91,32 +91,26 @@ _SCAN_DEFAULTS = {
 }
 SCFG = {**_SCAN_DEFAULTS, **SCAN}                        # 生效的扫描配置(默认合并用户覆盖)
 
-# ---- 选股池(v3.11.13): 每日定时全市场扫描主板, 找出
-#      「过去N根K线里有M根 MA短 在 MA长 下方(前期充分粘合/压制)
-#        + 当根 MA短 从下往上上穿 MA长」的标的;
-#      若同时出现 SKDJ 的 K≈20 且向上金叉 D, 则加分并优先推荐。
-#      默认阈值可被 portfolio.json 的 settings.stock_pool 覆盖。
+# ---- 选股池: 每日定时全市场扫描主板, 取 TopN 推荐;
+#      具体判定逻辑与权重已封装进受保护模块, 不在源码/配置明文出现。
+#      结构性参数可被 portfolio.json 的 settings.stock_pool 覆盖。
 _POOL_DEFAULTS = {
     "scan_hhmm": "14:25",            # 每日自动扫描时刻(收盘前35分钟, 留足尾盘交易时间)
     "top_n": 3,                      # 推荐数量
-    "ma_short": 3,                   # 短期均线(3日线)
-    "ma_long": 7,                    # 长期均线(7日线)
-    "lookback": 5,                   # 「过去N根K线」窗口(不含当根)
-    "below_need": 4,                 # 窗口内至少 N 根 MA短 < MA长
-    "skdj_n": 9,                     # SKDJ 的 RSV 周期
-    "skdj_m1": 3,                    # K 的平滑周期
-    "skdj_m2": 3,                    # D 的平滑周期
-    # v3.12: 打分权重 w_* 与 SKDJ 低位区间 skdj_low/high 已内嵌进加密策略模块
-    # (strategy_pool.blob, 机密配方), 不在源码/配置明文出现。如需调参:
-    #   1) 改 strategy_pool.py 的 _SECRET_WEIGHTS
-    #   2) 运行 python build_strategy.py 重新加密
-    #   3) 删除明文 strategy_pool.py
+    "n_short": 3,                    # 短周期参数(3)
+    "n_long": 7,                     # 长周期参数(7)
+    "lookback": 5,                   # 「过去N根」窗口(不含当根)
+    "below_need": 4,                 # 窗口内至少 N 根处于下方
+    "n_period": 9,                   # 辅助指标的周期参数
+    "n_smooth1": 3,                  # 辅助指标平滑参数1
+    "n_smooth2": 3,                  # 辅助指标平滑参数2
+    # 打分权重等机密参数已内嵌进受保护模块, 不在源码/配置明文出现
     "workers": 24,                   # 并发抓取日K的线程数
-    "bars": 30,                      # 每只抓取的日K根数(需覆盖 MA长+窗口+SKDJ 预热)
+    "bars": 30,                      # 每只抓取的日K根数(需覆盖全部历史计算所需窗口)
     "max_scan": 0,                   # 最多扫描只数(0=全部主板, 按成交额降序截断)
     "min_amount": 0,                 # 最低成交额(元)预筛, 0=不筛
-    # v3.12 提速预筛: 用实时行情直接砍掉明显不符标的, 减少需跑指标计算的数量
-    "pref_min_price": 5.0,           # 现价低于该值直接剔除(低价垃圾股, 极难满足均线上穿形态)
+    # 提速预筛: 用实时行情直接砍掉明显不符标的, 减少需跑指标计算的数量
+    "pref_min_price": 5.0,           # 现价低于该值直接剔除(低价股, 形态上较难满足推荐条件)
     "pref_min_float_mv": 20.0,       # 流通市值(亿)低于该值直接剔除
     "pref_min_amount": 20000000.0,   # 当日成交额(元)低于该值剔除(流动性差, 成交额小则量能不足)
 }
@@ -191,7 +185,7 @@ STATE = {
     # v3.10: 预测回测闭环 + 本地日线库
     "gapup_verify_date": None, "pred_verify_time": None,
     "idx_predlog_time": None, "daily_bars_date": None,
-    # v3.11.13: 选股池(每日定时扫描主板 MA上穿+SKDJ低位金叉)
+    # v3.11.13: 选股池(每日定时扫描主板, 取TopN推荐)
     "stock_pool": None, "stock_pool_date": None, "stock_pool_scanning": False,
     # v3.12: 全主板日线库预热状态(收盘后15:12触发, 每日一次)
     "daily_warmup_date": None,

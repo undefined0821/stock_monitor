@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""选股策略加载器。
+"""受保护载荷加载器。
 
-- 策略源以受保护形式存放于数据文件, 运行时载入并导出 ma / skdj_series / pool_eval 三个纯函数;
+- 核心逻辑以受保护形式存放于数据文件, 运行时载入并导出三个纯函数供扫描调用;
 - 主密钥不以明文存放, 需逆向本模块才能还原;
 - 仅依赖 Python 标准库, 跨平台可移植。
 """
-import os, zlib as _c, hashlib as _h, hmac as _m
+import os
+_c = __import__("zlib"); _h = __import__("hashlib"); _m = __import__("hmac")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BLOB = os.path.join(HERE, "strategy_pool.blob")
@@ -51,7 +52,7 @@ def _unpack():
 
 
 def load():
-    """返回 (ma, skdj_series, pool_eval); 载入失败回退 None。"""
+    """返回三个纯函数(指标计算/序列计算/综合评估); 载入失败回退 None。"""
     global _cache
     if _cache is not None:
         return _cache
@@ -61,9 +62,9 @@ def load():
         return None
     ns = {}
     try:
-        code = compile(src, "<strategy_pool>", "exec")
+        code = compile(src, "<protected>", "exec")
         exec(code, ns)
-        _cache = (ns["ma"], ns["skdj_series"], ns["pool_eval"])
+        _cache = (ns["_f0"], ns["_f1"], ns["_f2"])
     except Exception:
         _cache = None
     return _cache

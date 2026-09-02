@@ -30,7 +30,7 @@ from core import *    # 共享核心: BASE/STATE/FCONFIG/SCFG/全局常量/时�
 from market_data import *  # 行情数据层
 from backtest import *     # 预测回测闭环
 from calib import *     # 校准与调参(拆分自 app.py)
-from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 加密选股策略加载器
+from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 受保护策略加载器
 app = Flask(__name__)
 VERSION = "v3.11.13"   # 版本号由用户掌控, 本功能为 v3.11.13 下的持续优化(不自行递增)
 
@@ -2223,7 +2223,7 @@ def _daily_merge_kline(day_vals):
 
 def warmup_daily_library(force=False, codes=None, days=None, workers=None):
     """v3.12: 全主板日线库预热 —— 选股池零网络扫描的前提。
-    背景: 选股扫描需每只股票最近 ~35 根日K(算 MA长+lookback+SKDJ), 而原日线库仅收录
+    背景: 选股扫描需每只股票最近 ~35 根日K才能算出全部判定所需序列, 而原日线库仅收录
     持仓/自选/指数(几十只), 扫描时 ~3100 只全部回退在线 _fetch_kline, 逐只联网导致
     结果拖到收盘后无法交易。本函数把全主板每只股票的最近 N 天日K一次性抓齐并合并进
     daily_bars.jsonl, 之后选股扫描纯读本地(零网络), 数十秒出结果。
@@ -2305,8 +2305,8 @@ def get_daily_bars(code, days=60):
 
 
 # ----------------------------- 选股池(v3.12) -----------------------------
-# 策略核心(MA上穿判定 / SKDJ低位金叉打分 / 权重阈值)已加密为 strategy_pool.blob,
-# 由 strategy_loader 运行时内存解密加载, 源码与前端均无明文策略。仅在此保留薄包装。
+# 核心判定逻辑已加密为受保护载荷, 由 strategy_loader 运行时内存解密加载,
+# 源码与前端均无明文策略。仅在此保留薄包装。
 # 题材解析(_pool_theme)属分类而非打分策略, 保留在本地(不联网)。
 
 def _pool_theme(code, name):
@@ -2340,14 +2340,14 @@ def _get_strategy():
     return _STRATEGY
 
 
-def _pool_eval(bars, code, name, price, pct):
-    """按加密策略评估单只股票。返回 (是否命中, 详情dict|None)。"""
+def _scan_one(bars, code, name, price, pct):
+    """按受保护策略评估单只股票。返回 (是否命中, 详情dict|None)。"""
     st = _get_strategy()
     if st is None:
         return False, None                       # 策略不可用(缺blob/解密失败)时放弃该股
-    _ma_f, _skdj_f, _pe_f = st
+    _fa, _fb, _fc = st
     theme = _pool_theme(code, name)
-    ok, info = _pe_f(bars, code, name, price, pct, PCFG, theme)
+    ok, info = _fc(bars, code, name, price, pct, PCFG, theme)
     if ok and info is not None:
         info["market"] = _market_prefix(code) or "sh"   # 市场前缀非机密, 由调用方补齐
     return ok, info
@@ -2392,7 +2392,7 @@ def _build_stock_pool(force=False):
             if p.get("min_amount") and amt < float(p["min_amount"]):
                 continue
             # v3.12 提速预筛: 用实时行情直接砍掉明显不符标的(价低/市值小/成交额枯竭),
-            # 大幅减少需跑 MA/SKDJ 指标计算的股票数 —— 从 ~3100 只降到 ~600-1000 只。
+            # 大幅减少需跑指标计算的股票数 —— 从 ~3100 只降到 ~600-1000 只。
             if p.get("pref_min_price") and d["price"] < float(p["pref_min_price"]):
                 continue
             if p.get("pref_min_float_mv"):
@@ -2412,7 +2412,7 @@ def _build_stock_pool(force=False):
         # (与 _fetch_kline(include_today=True) 等价), 把 ~3000 次 HTTP 请求降为 0。
         # v3.12 提速: 本地库文件未变时复用上次解析出的 {code: bars} 内存表(缓存),
         # 避免每次扫描都重读 ~200MB 文件(读取+解析可省数秒)。
-        min_bars = int(p["lookback"]) + int(p["ma_long"]) + 1
+        min_bars = int(p["lookback"]) + int(p["n_long"]) + 1
         bars_n = max(int(p["bars"]), min_bars + 2)
         _dmap = None
         try:
@@ -2478,7 +2478,7 @@ def _build_stock_pool(force=False):
                             bars = _fetch_kline(c, days=bars_n, include_today=True)
                 if len(bars) < min_bars:
                     return None
-                ok, info = _pool_eval(bars, c, nm, d["price"], d["pct"])
+                ok, info = _scan_one(bars, c, nm, d["price"], d["pct"])
                 return info if ok else None
             except Exception:
                 return None

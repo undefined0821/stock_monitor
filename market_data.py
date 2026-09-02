@@ -156,7 +156,7 @@ def _fetch_kline(code, days=12, include_today=False):
     """返回最近 days 个交易日的日K列表(前复权), 每项 {date,open,close,high,low}; 失败返回 []。
 
     用于妖股检测: 数截至昨日的连续涨停天数(连板基因)。
-    include_today=True 时**保留当日(盘中未收盘)那根K线**, 供选股池判断"当根均线是否上穿"——
+    include_today=True 时**保留当日(盘中未收盘)那根K线**, 供选股池当日择时参考——
     盘中该根的 close 即最新价, 属于实时未完成K线, 仅供当日择时参考。
     默认 False(排除当日)以保持妖股检测"截至昨日"的原有语义。
     """
