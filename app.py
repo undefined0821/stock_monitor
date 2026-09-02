@@ -2449,7 +2449,8 @@ def _build_stock_pool(force=False):
         if _need_warm:
             try:
                 print(f"[stock_pool] 本地日线库覆盖率 {_coverage}/{len(codes)}, 先预热再扫描…", flush=True)
-                warmup_daily_library(force=True, codes=codes, days=bars_n)
+                _wu = warmup_daily_library(force=True, codes=codes, days=bars_n)
+                STATE["daily_warmup_last"] = _wu
                 _dmap = {}
                 for _r in _load_daily():
                     _bs = _r.get("bars") or {}
@@ -2513,6 +2514,24 @@ def _build_stock_pool(force=False):
                     x["theme"] = auto_classify(x["code"], x.get("market"), x.get("name")) or ""
                 except Exception:
                     pass
+        # v3.11.14-C: 数据就绪度自检 —— 日线库天数不足时, 信号无法计算(非回归, 是沙箱
+        # 历史K线接口暂不可达导致一次性回补未完成)。显式标注, 避免静默 0 命中被误读为故障。
+        _lib_days = 0
+        try:
+            _lib_days = len(_load_daily())
+        except Exception:
+            pass
+        _data_ready = _lib_days >= min_bars
+        STATE["stock_pool_data_days"] = _lib_days
+        STATE["stock_pool_data_need"] = min_bars
+        STATE["stock_pool_data_ready"] = _data_ready
+        _note = (f"主板扫描 {len(cands)} 只 · 命中 {len(hits)} 只 · "
+                 f"取分数最高 {len(top)} 只")
+        if not _data_ready:
+            _gap = max(0, min_bars - _lib_days)
+            _wu_fetched = (STATE.get("daily_warmup_last") or {}).get("fetched", 0)
+            _note += (f" | 日线库仅 {_lib_days} 天(需 ≥{min_bars} 天): 历史K线接口在沙箱暂不可达, "
+                      f"本次预热仅抓回 {_wu_fetched} 只; 约 {_gap} 个交易日后随每日行情自动累积即可恢复信号")
         with LOCK:
             STATE["stock_pool"] = {
                 "date": today,
@@ -2520,8 +2539,10 @@ def _build_stock_pool(force=False):
                 "rows": top,
                 "scanned": len(cands),
                 "matched": len(hits),
-                "note": (f"主板扫描 {len(cands)} 只 · 命中 {len(hits)} 只 · "
-                         f"取分数最高 {len(top)} 只"),
+                "note": _note,
+                "data_days": _lib_days,
+                "data_need": min_bars,
+                "data_ready": _data_ready,
                 "seconds": round(time.time() - t0, 1),
             }
             STATE["stock_pool_date"] = today
@@ -2626,6 +2647,9 @@ def api_stock_pool():
         cur["scanning"] = bool(STATE.get("stock_pool_scanning"))
         cur["scanned_live"] = STATE.get("stock_pool_scanned", 0)
         cur["total_live"] = STATE.get("stock_pool_total", 0)
+        cur["data_days"] = STATE.get("stock_pool_data_days", cur.get("data_days"))
+        cur["data_need"] = STATE.get("stock_pool_data_need", cur.get("data_need"))
+        cur["data_ready"] = STATE.get("stock_pool_data_ready", cur.get("data_ready"))
         return jsonify(cur)
     return jsonify({"date": None, "rows": [], "scanned": 0, "matched": 0,
                     "scanning": bool(STATE.get("stock_pool_scanning")),
