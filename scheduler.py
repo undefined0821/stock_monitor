@@ -63,15 +63,15 @@ def scheduler_loop():
                             app._post_open_filter()
                         except Exception:
                             traceback.print_exc()
-                # 选股池(v3.11.13): 每日定时(默认14:25)全市场扫描主板, 取TopN推荐。
-                #   v3.12: 依赖本地日线库预热(见下方 warmup 触发), 扫描纯读本地零网络,
-                #   数秒~数十秒出结果, 确保收盘前(留足交易时间)拿到推荐。
+                # 选股池(v3.11.13): 每日定时(默认14:30)全市场扫描主板, 取TopN推荐。
+                #   v3.11.14: 自动扫描用独立 daily 标记 stock_pool_auto_date —— 手动刷新(立即扫描)
+                #   只写 stock_pool_date, 不占用自动名额, 故当日手动扫过也不影响 14:30 自动触发。
                 try:
                     sp_from = _parse_hhmm(PCFG["scan_hhmm"])
                 except Exception:
-                    sp_from = datetime.time(14, 25)
-                if now.time() >= sp_from and STATE.get("stock_pool_date") != today:
-                    STATE["stock_pool_date"] = today
+                    sp_from = datetime.time(14, 30)
+                if now.time() >= sp_from and STATE.get("stock_pool_auto_date") != today:
+                    STATE["stock_pool_auto_date"] = today
                     threading.Thread(target=app._build_stock_pool, daemon=True).start()
 
                 # 14:50 尾盘预测(异步 worker + AI 融合, 不阻塞调度循环)

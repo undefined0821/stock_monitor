@@ -32,7 +32,7 @@ from backtest import *     # 预测回测闭环
 from calib import *     # 校准与调参(拆分自 app.py)
 from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 受保护策略加载器
 app = Flask(__name__)
-VERSION = "v3.11.13"   # 版本号由用户掌控, 本功能为 v3.11.13 下的持续优化(不自行递增)
+VERSION = "v3.11.14"   # 版本号由用户掌控, 本功能为 v3.11.13 下的持续优化(不自行递增)
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 
