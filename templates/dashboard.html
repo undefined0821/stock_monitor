@@ -182,11 +182,11 @@ td:first-child,th:first-child{text-align:left}
   <div class="grid markets">
     <div class="card"><h3>三大指数</h3><table id="idx"></table></div>
     <div class="card"><h3>题材涨跌（细分主线） <span class="code" id="sb2"></span></h3>
-      <div id="sectors" style="max-height:300px;overflow:auto"></div>
-      <div id="sectorBoards"></div>
+      <div id="sectors" style="max-height:260px;overflow:auto"></div>
       <div class="note" id="bias"></div>
       <div class="note" id="devSummary"></div>
     </div>
+    <div class="card"><h3>板块涨跌（12 中证行业）</h3><div id="sectorBoards"></div></div>
     <div class="card" id="retailCard" style="border-color:var(--gold)"><h3>国证2000 小盘涨跌（散户代理）</h3><div id="retail"><div class="note">加载中…</div></div></div>
   </div>
 
@@ -431,9 +431,8 @@ function render(d){
   }
   // 12 个中证行业板块涨跌榜(板块联动总览): 板块均涨的明细支撑
   const secs=d.sectors||[];
-  let sbHtml='<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--row-line)"><div class="grp">板块涨跌（12 中证行业）</div>';
+  let sbHtml='';
   secs.forEach(x=>{sbHtml+='<div style="margin:4px 0;display:flex;justify-content:space-between;gap:8px"><span>'+x.name+'</span><span class="'+cls(x.pct)+'">'+sign(x.pct)+'%</span></div>';});
-  sbHtml+='</div>';
   document.getElementById('sectorBoards').innerHTML=sbHtml;
   document.getElementById('bias').textContent=d.sector_bias;
   // 散户今日平均盈亏(国证2000近似) —— 紧凑版
@@ -636,11 +635,23 @@ function manual(t){
     const tip=document.getElementById('poolTip');
     if(b&&!b.disabled){
       b.disabled=true;b.style.opacity=.6;b.textContent='⏳ 扫描中…';
-      if(tip)tip.textContent='正在全市场扫描主板（约需 1~3 分钟），请稍候自动更新…';
-      fetch('/api/stock_pool?rescan=1').then(r=>r.json()).then(()=>{
-        setTimeout(()=>{loadStockPool();if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}
-          if(tip)tip.textContent='点击立即全市场扫描主板，约需 1~3 分钟';},800);
-      }).catch(()=>{if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}});
+      if(tip)tip.textContent='正在全市场扫描主板（约 1~3 分钟），完成后自动显示推荐结果…';
+      fetch('/api/stock_pool?rescan=1').then(()=>{
+        // 轮询直到扫描结束(后台线程扫描约1~3分钟, 期间持续显示进度)
+        const iv=setInterval(()=>{
+          fetch('/api/stock_pool').then(r=>r.json()).then(p=>{
+            renderStockPool(p);
+            if(!p.scanning){
+              clearInterval(iv);
+              if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}
+              if(tip)tip.textContent='点击立即全市场扫描主板，约需 1~3 分钟';
+            }
+          }).catch(()=>{});
+        }, 5000);
+      }).catch(()=>{
+        if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}
+        if(tip)tip.textContent='扫描触发失败，请重试';
+      });
     }
   }else{fetch('/api/'+t).then(r=>r.json()).then(()=>load());}
 }
@@ -651,9 +662,19 @@ function renderStockPool(p){
   if(!box) return;
   if(!p){box.innerHTML='<div class="note">加载中…</div>';return;}
   const rows=p.rows||[];
-  let r=`<div class="note">${p.note||''}${p.date?`（${p.date} ${p.time||''}${p.seconds!=null?' · 耗时'+p.seconds+'s':''}）`:''}</div>`;
+  // 扫描进行中: 显示进度, 不显示"无"
+  if(p.scanning){
+    box.innerHTML='<div class="note">⏳ 正在全市场扫描主板（约 1~3 分钟），完成后自动显示推荐结果…</div>';
+    return;
+  }
+  // 今日尚未到 14:30, 还未扫描: 提示自动时间, 不显示"无"
+  if(!p.date){
+    box.innerHTML='<div class="note">尚未扫描：每个交易日 <b>14:30</b> 自动执行全市场扫描，到点刷新本页即可查看；或点「立即扫描」。</div>';
+    return;
+  }
+  let r=`<div class="note">${p.note||''}（${p.date} ${p.time||''}${p.seconds!=null?' · 耗时'+p.seconds+'s':''}）</div>`;
   if(!rows.length){
-    // 用户要求: 今日没有推荐就写"无"
+    // 已扫描但无命中: 才是真正的"无"
     r+=`<div style="margin-top:8px"><b>今日推荐：无</b></div>`
       +`<div class="note">今日全市场扫描未发现同时满足「过去5根有4根 MA3 在 MA7 下方」且「当根 MA3 上穿 MA7」的主板标的。</div>`;
     box.innerHTML=r;return;

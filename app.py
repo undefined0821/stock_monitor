@@ -2496,6 +2496,10 @@ def api_stock_pool():
     with LOCK:
         cur = STATE.get("stock_pool")
     if cur:
+        # v3.11.13: 注入实时 scanning 状态 —— 否则扫描中 STATE['stock_pool'] 仍是旧值(无该字段),
+        # 前端轮询永远读不到"正在扫描", 表现为点击立即扫描毫无反应。
+        cur = dict(cur)
+        cur["scanning"] = bool(STATE.get("stock_pool_scanning"))
         return jsonify(cur)
     return jsonify({"date": None, "rows": [], "scanned": 0, "matched": 0,
                     "scanning": bool(STATE.get("stock_pool_scanning")),
