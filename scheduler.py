@@ -2,9 +2,66 @@
 """调度循环: 定时触发各预测构建/校准/落盘/验证/日线采集。
 import app 延迟引用(函数体调用 app.xxx), 避免与 app 的循环导入。由 app.py 拆分。"""
 
-import time, threading, datetime, os, traceback
+import time, threading, datetime, os, traceback, urllib.request, urllib.error
 import app
 from core import *
+
+
+def _self_keepalive_once(url, timeout=10):
+    """向公网地址发一次自请求。返回 (ok, 描述)。
+
+    刻意请求公网域名而非 127.0.0.1: 只有经平台入口网关进来的请求才会被计为外部访问,
+    本地回环不产生入站流量, 挡不住休眠。
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "stock-monitor-self-keepalive/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return (200 <= getattr(r, "status", 200) < 400, str(getattr(r, "status", 200)))
+
+
+def self_keepalive_loop():
+    """工作日交易时段周期性自请求公网地址, 制造外部入站流量, 防止平台把沙箱置为休眠。
+
+    为什么需要: 沙箱休眠期间进程冻结, 盘前候选池(9:25:02-9:30)、尾盘预测(14:50)、
+    收盘落库(15:05)、日线预热(15:12)、回填验证等定时任务被整体错过, 而调度是"唤醒后
+    补跑"语义, 只补得回醒着时错过的触发点 —— 落盘窗口一旦错过, 当天的预测记录根本
+    不存在, 回填自然永远 0 样本。
+
+    局限: 只能续命, 不能复活。沙箱已休眠时需先有一次真实外部访问(打开页面/外部定时
+    任务)把它唤醒, 之后本线程即可维持不休眠。
+    """
+    beat = 0
+    while True:
+        try:
+            now = beijing_now()
+            in_window = (SELF_KEEPALIVE_ON and is_weekday(now)
+                         and SELF_KEEPALIVE_START <= now.time() <= SELF_KEEPALIVE_END)
+            if not in_window:
+                time.sleep(300)
+                continue
+            try:
+                ok, desc = _self_keepalive_once(SELF_KEEPALIVE_URL)
+            except Exception as e:
+                ok, desc = False, (type(e).__name__ + ": " + str(e)[:80])
+            with LOCK:
+                if ok:
+                    STATE["self_keepalive_ok"] = STATE.get("self_keepalive_ok", 0) + 1
+                else:
+                    STATE["self_keepalive_fail"] = STATE.get("self_keepalive_fail", 0) + 1
+                STATE["self_keepalive_last"] = now.strftime("%H:%M:%S")
+                STATE["self_keepalive_code"] = desc
+            # 正常成功静默(每 12 次约 1 小时打一条, 便于确认仍在续命); 失败则每次都打,
+            # 连续失败是"沙箱已被休眠/网络不通"的直接信号, 不能吞掉。
+            beat += 1
+            if not ok:
+                print(f"[keepalive] 自请求失败 {now.strftime('%H:%M:%S')} -> {desc}")
+            elif beat % 12 == 1:
+                print(f"[keepalive] 续命中 {now.strftime('%H:%M:%S')} "
+                      f"ok={STATE.get('self_keepalive_ok', 0)} fail={STATE.get('self_keepalive_fail', 0)}")
+            time.sleep(SELF_KEEPALIVE_INTERVAL_SEC if ok else 60)
+        except Exception:
+            traceback.print_exc()
+            time.sleep(60)
+
 
 def scheduler_loop():
     while True:

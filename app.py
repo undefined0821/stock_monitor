@@ -2658,6 +2658,17 @@ def api_stock_pool():
                     "note": "尚未扫描（每交易日 14:25 自动执行，可点「立即扫描」）"})
 
 
+@app.route("/api/keepalive")
+def api_keepalive():
+    """v3.11.14: 极轻量探活(自保活线程的施压目标)。不抓行情、不算指标, 只回进程存活
+    与保活计数 —— 目的仅是让请求经平台入口网关进来, 被计作一次外部访问。"""
+    return jsonify({"ok": True, "t": beijing_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "ka_last": STATE.get("self_keepalive_last"),
+                    "ka_ok": STATE.get("self_keepalive_ok", 0),
+                    "ka_fail": STATE.get("self_keepalive_fail", 0),
+                    "ka_code": STATE.get("self_keepalive_code")})
+
+
 @app.route("/api/pred_stats")
 def api_pred_stats():
     """v3.10: 各预测模块的命中率/校准偏差回测统计。?refresh=1 强制重算。"""
@@ -2894,11 +2905,14 @@ DASHBOARD_HTML = open(os.path.join(BASE, "templates", "dashboard.html"), encodin
 
 
 if __name__ == "__main__":
-    from scheduler import scheduler_loop  # 延迟导入, 避免与 scheduler 的 import app 形成循环导入
+    from scheduler import scheduler_loop, self_keepalive_loop  # 延迟导入, 避免与 scheduler 的 import app 形成循环导入
     _ensure_runtime_data()   # 兜底: 缺失的运行时数据文件用模板/基线初始化
     # 启动独立快扫线程(9:25:02-9:30期间, 每PREOPEN_FAST_SEC秒刷新Top30+重算AI)
     threading.Thread(target=_preopen_fast_loop, daemon=True).start()
     threading.Thread(target=scheduler_loop, daemon=True).start()
+    # v3.11.14: 交易时段内每5分钟自请求公网地址, 制造外部入站流量防沙箱休眠
+    # (休眠会让所有定时任务被整体错过, 表现为预测回测样本恒为0)
+    threading.Thread(target=self_keepalive_loop, daemon=True).start()
     threading.Thread(target=_backfill_themes, daemon=True).start()  # 后台补齐存量持仓题材
     print(f"监控平台 v2 启动: http://localhost:{PORT}")
     app.run(host="0.0.0.0", port=PORT, threaded=True)

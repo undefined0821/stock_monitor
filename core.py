@@ -3,7 +3,7 @@
 由 app.py 拆分而来, 各子模块用 `from core import *` 引入, 避免循环依赖。"""
 
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
-__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'DAILY_WARMUP_DAYS', 'DAILY_WARMUP_WORKERS', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'KLINE_RPS', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_rate_limit', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
+__all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'DAILY_WARMUP_DAYS', 'DAILY_WARMUP_WORKERS', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'KLINE_RPS', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SELF_KEEPALIVE_END', 'SELF_KEEPALIVE_INTERVAL_SEC', 'SELF_KEEPALIVE_ON', 'SELF_KEEPALIVE_START', 'SELF_KEEPALIVE_URL', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_rate_limit', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +68,21 @@ def _rate_limit(rps=None):
         wait = start - now
     if wait > 0:
         time.sleep(wait)
+
+# v3.11.14: 内置自保活。部署平台以"一段时间无外部访问"为依据把沙箱置为休眠, 休眠期间
+# 进程被冻结, 定时任务(盘前候选池/尾盘预测/收盘落库/回填验证)全部错过, 直接表现为预测
+# 回测总览样本数长期为 0。关键在于: 已有的进程级看门狗只探活 127.0.0.1, 流量不经平台
+# 网关、不算外部访问, 挡不住休眠; 必须周期性请求一次**公网地址**, 让请求从平台入口网关
+# 进来, 才被计为一次外部访问。故进程内起一个线程, 在工作日交易时段定时自请求公网地址续命。
+# 注意: 该机制只能"续命", 不能"复活" —— 若沙箱已休眠, 需先有一次真实外部访问把它唤醒。
+SELF_KEEPALIVE_ON = os.environ.get("SELF_KEEPALIVE", "1") != "0"       # 置 0 可关闭
+SELF_KEEPALIVE_URL = os.environ.get(
+    "SELF_KEEPALIVE_URL",
+    "https://d9c9dea964be403f82604fc97bb78282.app.workbuddy.link/api/keepalive")
+SELF_KEEPALIVE_INTERVAL_SEC = 300      # 交易时段内自请求间隔(秒)
+SELF_KEEPALIVE_START = datetime.time(9, 0)     # 早于盘前候选池窗口, 覆盖开盘前准备
+SELF_KEEPALIVE_END = datetime.time(15, 35)     # 晚于收盘落库(15:05)与日线预热(15:12)
+
                             # v3.12: 全主板(3151只)各保留 ~35 根日K供选股池零网络扫描,
                             # 体积需覆盖 全主板×35天; 400MB 足够(实测约 200-300MB)。
 DAILY_UNIVERSE_LIMIT = 0      # 0=全市场; >0 则只存前N只(按代码序), 用于限制体积
@@ -217,6 +232,11 @@ STATE = {
     "stock_pool": None, "stock_pool_date": None, "stock_pool_scanning": False,
     # v3.12: 全主板日线库预热状态(收盘后15:12触发, 每日一次)
     "daily_warmup_date": None,
+    # v3.11.14: 内置自保活(防沙箱休眠导致定时任务被整体错过)
+    "self_keepalive_last": None,   # 最近一次自请求时刻(HH:MM:SS)
+    "self_keepalive_ok": 0,        # 累计成功次数
+    "self_keepalive_fail": 0,      # 累计失败次数
+    "self_keepalive_code": None,   # 最近一次 HTTP 状态码/错误信息
 }
 
 def beijing_now():
