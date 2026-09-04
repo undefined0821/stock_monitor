@@ -729,6 +729,9 @@ def verify_predictions():
 
 def _recompute_pred_stats():
     """按模块累计: 样本数/命中率/平均预测概率/校准偏差/分方向明细/最近明细。"""
+    # v3.11.15: 延迟绑定 calib 的 _apply_pred_calib。本模块与 calib 互引, 不能顶层 import,
+    # 此前漏绑导致本函数一调用即 NameError, 统计永远写不进 → 总览尾盘模块恒显 0 样本。
+    _apply_pred_calib = _calib()._apply_pred_calib
     stats = {"updated_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S"), "modules": {}}
     buckets = {m: [] for m in PRED_MODULES}
     for r in _load_pred_log():
