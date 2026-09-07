@@ -342,7 +342,7 @@ PRED_MODULES = {
     "close_stock":     {"label": "尾盘个股次日", "horizon": "next_day",   "flat": 0.50},
     "preopen_limitup": {"label": "盘前涨停预测", "horizon": "today_close", "flat": 0.0},
 }
-IDX_PRED_LOG_SEC = 900          # 上证预测每5秒刷新, 落盘记录按15分钟节流, 避免日志爆炸
+IDX_PRED_LOG_SEC = 300          # v3.11.18: 落盘节流 15分钟→5分钟 —— Platt校准(30样本)/自动调参(50样本)激活天数从周级缩到日级, 日增~48条仍远小于日志体积风险
 LIMITUP_HIT_PCT = 9.8           # 主板涨停判定(留0.2pp容差, 覆盖价格舍入)
 
 

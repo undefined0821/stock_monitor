@@ -279,6 +279,46 @@ def _confidence(prob, breadth, ai_prob=None, heuristic_prob=None):
     return round(min(1.0, max(0.0, raw / cap)), 2)
 
 
+# v3.11.18: 均线趋势特征(带TTL缓存) —— 星辰理念因子化: 趋势交易(MA多头排列)+严进(乖离率)
+_MA_CACHE = {}
+_MA_TTL_SEC = 1800                # 日线级别特征, 30分钟刷新足够(index_forecast 5秒刷新不能每次抓K线)
+
+def _ma_features(code, market=""):
+    """截至昨日的 MA5/MA10/MA20: 返回 (ma5, ma10, ma20) 或 None(数据缺失, 因子按0处理)。
+    market="sh" 时按指数解析(避免 000001 被误判为深市个股)。"""
+    key = market + code
+    now = time.time()
+    c = _MA_CACHE.get(key)
+    if c and now - c[0] < _MA_TTL_SEC:
+        return c[1]
+    try:
+        bars = _fetch_kline(market + code if market else code, days=30)
+        closes = [b["close"] for b in bars]
+        if len(closes) >= 20:
+            r = (sum(closes[-5:]) / 5.0, sum(closes[-10:]) / 10.0, sum(closes[-20:]) / 20.0)
+            _MA_CACHE[key] = (now, r)
+            return r
+    except Exception:
+        pass
+    return None
+
+def _trend_score(ma):
+    """均线排列得分: -1(全空排列) ~ +1(全多排列); ma 为 None 时返回 None。"""
+    if not ma:
+        return None
+    ma5, ma10, ma20 = ma
+    n_above = (1 if ma5 > ma10 else 0) + (1 if ma10 > ma20 else 0) + (1 if ma5 > ma20 else 0)
+    return (n_above - 1.5) / 1.5
+
+def _bias_penalty(price, ma):
+    """乖离率严进罚项: |price-MA5|/MA5 超过5%的部分线性减分, -2 封顶; 数据缺失返回 None。"""
+    if not ma or not price:
+        return None
+    ma5 = ma[0]
+    bias = abs(price - ma5) / ma5 if ma5 else 0.0
+    return max(-2.0, -max(0.0, bias - 0.05) / 0.05)
+
+
 def _late_pull(code):
     """尾盘拉升强度(%): 最后10分钟均价相对前20分钟均价的涨跌幅。正=尾盘抢筹。"""
     try:
@@ -310,7 +350,7 @@ def index_forecast(snap=None):
     late = ctx["late"]
     breadth = ctx["breadth"]
     retail = ctx["retail_pct"]
-    # 多因子线性打分 (7维)
+    # 多因子线性打分 (8维)
     score = 0.0
     score += pct * FCONFIG["idx_pct_w"]                          # ①当日涨幅动量
     score += late * FCONFIG["idx_late_w"]                         # ②尾盘动向 (强预测力)
@@ -319,6 +359,9 @@ def index_forecast(snap=None):
     score += (wb / 100.0) * FCONFIG["idx_wb_w"]                   # ⑤委比
     score += (breadth - 0.5) * FCONFIG["idx_breadth_w"]           # ⑥宽度 (上涨板块占比)
     score += retail * FCONFIG["idx_retail_w"]                     # ⑦国证2000小盘情绪
+    # ⑧日线趋势排列(v3.11.18, 星辰理念: 趋势交易) —— 截至昨日MA排列, 带TTL缓存
+    tr = _trend_score(_ma_features("000001", market="sh"))
+    score += (tr if tr is not None else 0.0) * FCONFIG["idx_trend_w"]
     prob = 1 / (1 + math.exp(-score / FCONFIG["idx_sig"])) * 100
     # 三段式判定: 避免在概率接近50时强行判定涨跌(阈值可由 v3.11 自动调参覆盖)
     T = _MODULE_THRESHOLDS.get("idx_1h", 58)
@@ -335,6 +378,7 @@ def index_forecast(snap=None):
         "prob": round(prob, 1), "verdict": verdict,
         "weibi": round(wb, 1), "vr": round(vr, 2), "pos": round(pos, 3),
         "late": round(late, 3), "breadth": breadth,
+        "trend": round(tr, 3) if tr is not None else None,
         "breadth_up": ctx["breadth_up"], "breadth_down": ctx["breadth_down"],
         "retail": round(retail, 2),
         "ai_used": False, "confidence": confidence,
@@ -405,7 +449,8 @@ def _build_idx_worker():
                          "feats": {"pct": base.get("pct", 0), "late": base.get("late", 0),
                                    "pos": base.get("pos", 0.5), "vr": base.get("vr", 1),
                                    "wb": base.get("weibi", 0), "breadth": base.get("breadth", 0.5),
-                                   "retail": base.get("retail", 0)}},
+                                   "retail": base.get("retail", 0),
+                                   "trend": base.get("trend") or 0}},
                         _add_trading_minutes(_now2, 60))
             except Exception:
                 traceback.print_exc()
@@ -1109,7 +1154,19 @@ def nextday_prob(h, snap, ctx):
     c7 = (breadth - 0.5) * W["stk_breadth_w"]
     c8 = retail_pct * W["stk_retail_w"]
     c9 = late * W["stk_late_w"]
-    score = c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9
+    # v3.11.18: 星辰理念先验因子 —— 趋势交易(MA5/10/20排列) + 严进(乖离率>5%线性减分)。
+    # 权重保守默认, 已注册进 _TUNE_SPEC, 由自动调参随样本积累修正; K线失败时按0处理。
+    ma = _ma_features(h["code"])
+    tr_s = _trend_score(ma)
+    bi_p = _bias_penalty(price, ma)
+    c10 = (tr_s if tr_s is not None else 0.0) * W["stk_trend_w"]
+    c11 = (bi_p if bi_p is not None else 0.0) * W["stk_bias_w"]
+    if ma is None:
+        _ma_note = "均线数据缺失, 因子按0"
+    else:
+        _n_up = int(round((tr_s + 1) * 1.5))
+        _ma_note = f"排列{_n_up}/3 乖离{abs(price - ma[0]) / ma[0] * 100:.1f}%"
+    score = c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10 + c11
     factors.append(("大盘", round(c1, 2), f"上证{sh_pct:+.2f}% 创业板{cyb_pct:+.2f}%"))
     factors.append((f"板块({h.get('sector_name','-')})", round(c2, 2), f"{sec_pct:+.2f}%"))
     factors.append(("当日阴阳", round(c3, 2), "收阳" if pct_pos >= 0 else "收阴"))
@@ -1119,12 +1176,16 @@ def nextday_prob(h, snap, ctx):
     factors.append(("宽度", round(c7, 2), f"上涨板块占比{breadth:.2f}"))
     factors.append(("小盘", round(c8, 2), f"国证2000{retail_pct:+.2f}%"))
     factors.append(("尾盘动向", round(c9, 2), f"上证尾盘{late:+.2f}%"))
+    factors.append(("趋势排列", round(c10, 2), _ma_note))
+    factors.append(("乖离严进", round(c11, 2), "|现价-MA5|/MA5 超5%部分减分"))
     prob = 1 / (1 + math.exp(-score / W["stk_sig"])) * 100
     T = _MODULE_THRESHOLDS.get("close_stock", 60)
     verdict = "偏多" if prob >= T else ("偏空" if prob <= 100 - T else "震荡")
     feats = {"sh_pct": sh_pct, "cyb_pct": cyb_pct, "sec_pct": sec_pct, "pct_pos": pct_pos,
              "lower": lower, "upper": upper, "turnover": turnover, "pnl_pct": pnl_pct,
-             "breadth": breadth, "retail_pct": retail_pct, "late": late}
+             "breadth": breadth, "retail_pct": retail_pct, "late": late,
+             "ma_trend": round(tr_s, 3) if tr_s is not None else 0,
+             "ma_bias": round(bi_p, 3) if bi_p is not None else 0}
     return {"name": h["name"], "code": h["code"], "prob": round(prob, 1),
             "verdict": verdict, "factors": factors, "feats": feats}
 
@@ -1143,6 +1204,9 @@ def close_prediction(snap):
     mscore += (breadth - 0.5) * FCONFIG["cl_breadth_w"]    # 宽度: 上涨板块占比
     mscore += retail * FCONFIG["cl_retail_w"]                # 国证2000小盘情绪
     mscore += late * FCONFIG["cl_late_w"]                    # 尾盘动向: 强预测力
+    # v3.11.18: 日线趋势排列(星辰理念: 趋势交易), 截至昨日, 带TTL缓存
+    sh_tr = _trend_score(_ma_features("000001", market="sh"))
+    mscore += (sh_tr if sh_tr is not None else 0.0) * FCONFIG["cl_trend_w"]
     mprob = 1 / (1 + math.exp(-mscore / FCONFIG["cl_sig"])) * 100
     confidence = _confidence(mprob, breadth)
     _T = _MODULE_THRESHOLDS.get("close_market", 58)
@@ -1151,7 +1215,9 @@ def close_prediction(snap):
               "sh_pct": sh_pct, "cyb_pct": cyb_pct,
               "sector_avg": sector_avg, "breadth": breadth,
               "breadth_up": ctx["breadth_up"], "breadth_down": ctx["breadth_down"],
-              "retail": retail, "late": late, "confidence": confidence}
+              "retail": retail, "late": late,
+              "sh_trend": round(sh_tr, 3) if sh_tr is not None else None,
+              "confidence": confidence}
     stocks = [nextday_prob(h, snap, ctx) for h in snap["holdings"] if not h.get("error")]
     return {"time": beijing_now().strftime("%H:%M:%S"), "market": market,
             "stocks": stocks,
@@ -1218,7 +1284,8 @@ def _build_close_worker():
                             "base_close": sh_px,
                             "feats": {"sh_pct": ctx["sh_pct"], "cyb_pct": ctx["cyb_pct"],
                                       "sector_avg": ctx["sector_avg"], "breadth": ctx["breadth"],
-                                      "retail": ctx["retail_pct"], "late": ctx["late"]}}, vat)
+                                      "retail": ctx["retail_pct"], "late": ctx["late"],
+                                      "sh_trend": m.get("sh_trend") or 0}}, vat)
             hpx = {h.get("code"): h.get("price") for h in snap.get("holdings", [])}
             for s in base.get("stocks", []):
                 code = s.get("code")

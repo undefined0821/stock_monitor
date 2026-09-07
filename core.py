@@ -166,6 +166,8 @@ _FORECAST_DEFAULTS = {
     # 上证指数1小时趋势预测
     "idx_pct_w": 2.2, "idx_late_w": 1.8, "idx_pos_w": 2.0, "idx_vr_w": 1.0,
     "idx_wb_w": 1.5, "idx_breadth_w": 3.0, "idx_retail_w": 0.8, "idx_sig": 6.0,
+    # v3.11.18: 日线趋势排列因子(截至昨日MA5/10/20, 星辰理念: 趋势交易; 保守默认待调参修正)
+    "idx_trend_w": 0.8,
     # v3.11.7: 上证1小时「给出方向性判定」所需的最低置信度(展示层门控)。
     # 低于此值只显示"观望", 不再把弱信号包装成涨跌判断。
     # 可用 portfolio.json 的 settings.forecast.idx_min_conf 覆盖。
@@ -174,10 +176,13 @@ _FORECAST_DEFAULTS = {
     # 尾盘预测(大盘明日方向)
     "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
     "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
+    "cl_trend_w": 1.0,   # v3.11.18: 上证日线趋势排列因子
     # 尾盘个股次日(close_stock, v3.11 参数化; 默认与旧硬编码一致, 行为不变)
     "stk_sh_w": 1.5, "stk_cyb_w": 1.0, "stk_sec_w": 1.2, "stk_yin_w": 1.5,
     "stk_amt_w": 0.5, "stk_posmag": 1.5, "stk_pnl_pos": 0.8, "stk_pnl_neg": 0.8,
     "stk_breadth_w": 3.0, "stk_retail_w": 0.6, "stk_late_w": 1.2, "stk_sig": 5.0,
+    # v3.11.18: 星辰理念先验因子 —— 趋势排列(MA多头排列) + 乖离严进(|价-MA5|/MA5>5%减分)
+    "stk_trend_w": 1.2, "stk_bias_w": 0.8,
     # 尾盘高开潜力
     "gu_pos_w": 3.5, "gu_parab_w": 1.0, "gu_wb_w": 2.2, "gu_vr_w": 0.6,
     "gu_to_w": 0.12, "gu_latepull_w": 1.5, "gu_breadth_w": 3.0,

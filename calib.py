@@ -272,11 +272,14 @@ _PRED_TUNE = {}           # 运行时调参结果(启动加载)
 _TUNE_W_DEFAULT = {
     "idx_pct_w": 2.2, "idx_late_w": 1.8, "idx_pos_w": 2.0, "idx_vr_w": 1.0,
     "idx_wb_w": 1.5, "idx_breadth_w": 3.0, "idx_retail_w": 0.8, "idx_sig": 6.0,
+    "idx_trend_w": 0.8,
     "cl_sh_w": 1.8, "cl_cyb_w": 1.0, "cl_sec_w": 1.2, "cl_breadth_w": 6.0,
-    "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0,
+    "cl_retail_w": 1.0, "cl_late_w": 2.5, "cl_sig": 6.0, "cl_trend_w": 1.0,
     "stk_sh_w": 1.5, "stk_cyb_w": 1.0, "stk_sec_w": 1.2, "stk_yin_w": 1.5,
     "stk_amt_w": 0.5, "stk_posmag": 1.5, "stk_pnl_pos": 0.8, "stk_pnl_neg": 0.8,
     "stk_breadth_w": 3.0, "stk_retail_w": 0.6, "stk_late_w": 1.2, "stk_sig": 5.0,
+    # v3.11.18: 星辰理念先验因子(趋势排列/乖离严进), 保守默认, 随样本积累由自动调参修正
+    "stk_trend_w": 1.2, "stk_bias_w": 0.8,
 }
 _SCFG_W_DEFAULT = {
     "limitup_weight": 0.6, "vr_weight": 1.5, "pct_weight": 0.8, "weibi_weight": 2.0,
@@ -287,14 +290,15 @@ _SCFG_W_DEFAULT = {
 }
 _TUNE_SPEC = {
     "idx_1h": {"kind": "fcfg", "wkeys": [k for k in _TUNE_W_DEFAULT if k.startswith("idx_")],
-               "feats": ["pct", "late", "pos", "vr", "wb", "breadth", "retail"],
+               "feats": ["pct", "late", "pos", "vr", "wb", "breadth", "retail", "trend"],
                "def_thr": 58, "pos": "up"},
     "close_market": {"kind": "fcfg", "wkeys": [k for k in _TUNE_W_DEFAULT if k.startswith("cl_")],
-               "feats": ["sh_pct", "cyb_pct", "sector_avg", "breadth", "retail", "late"],
+               "feats": ["sh_pct", "cyb_pct", "sector_avg", "breadth", "retail", "late", "sh_trend"],
                "def_thr": 58, "pos": "up"},
     "close_stock": {"kind": "fcfg", "wkeys": [k for k in _TUNE_W_DEFAULT if k.startswith("stk_")],
                "feats": ["sh_pct", "cyb_pct", "sec_pct", "pct_pos", "lower", "upper",
-                         "turnover", "pnl_pct", "breadth", "retail_pct", "late"],
+                         "turnover", "pnl_pct", "breadth", "retail_pct", "late",
+                         "ma_trend", "ma_bias"],
                "def_thr": 60, "pos": "up"},
     "preopen_limitup": {"kind": "scfg", "wkeys": list(_SCFG_W_DEFAULT.keys()),
                "feats": ["dist_limit_up", "vr", "pct", "wb", "fmv", "yao", "yao_days", "resonance"],

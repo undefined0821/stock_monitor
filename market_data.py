@@ -177,7 +177,9 @@ def _fetch_kline(code, days=12, include_today=False):
     盘中该根的 close 即最新价, 属于实时未完成K线, 仅供当日择时参考。
     默认 False(排除当日)以保持妖股检测"截至昨日"的原有语义。
     """
-    mkt = _market_prefix(code) + code
+    mkt = code if code[:2] in ("sh", "sz") else _market_prefix(code) + code
+    # v3.11.18: 允许传入已带市场前缀的代码(如 "sh000001") —— _market_prefix 会把
+    # 上证指数 "000001" 误判为深市(平安银行), 指数均线特征需要显式前缀。
     end = beijing_now().strftime("%Y-%m-%d")
     start = (beijing_now() - datetime.timedelta(days=days * 2)).strftime("%Y-%m-%d")
     url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
