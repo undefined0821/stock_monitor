@@ -260,14 +260,20 @@ def _market_context(snap=None):
 
 
 def _confidence(prob, breadth, ai_prob=None, heuristic_prob=None):
-    """置信度(0~1): 概率偏离中性 + 宽度极端度 + (启用AI时)启发式与AI方向一致性。"""
+    """置信度(0~1): 概率偏离中性 + 宽度方向一致性 + (启用AI时)启发式与AI方向一致性。
+    v3.11.16 修复「置信度与概率不匹配」: 宽度项旧版只取偏离幅度不看方向, 宽度极端偏空时
+    「偏多」判定的置信度反而被抬升; 现改为带符号(同向加分/反向扣分/中性不计), 并按可用
+    信号上限归一化, 使无AI参与时置信度与其他模块同一把尺。"""
     dist = abs(prob - 50) / 50.0                      # 0~1, 越偏离50越果断
-    ext = abs(breadth - 0.5) * 2.0                     # 0~1, 宽度越偏一侧越明确
-    agree = 0.0
+    ext = abs(breadth - 0.5) * 2.0                     # 0~1, 宽度偏离中性幅度
+    bs = (breadth - 0.5) * (prob - 50)                 # 宽度与概率方向: 同向>0 反向<0
+    w_ext = 0.25 * ext if bs > 0 else (-0.25 * ext if bs < 0 else 0.0)
+    agree = None
     if ai_prob is not None and heuristic_prob is not None:
         agree = 1.0 if (heuristic_prob >= 50) == (ai_prob >= 50) else 0.0
-    conf = 0.5 * dist + 0.25 * ext + 0.25 * agree
-    return round(min(1.0, max(0.0, conf)), 2)
+    raw = 0.5 * dist + w_ext + (0.25 * agree if agree is not None else 0.0)
+    cap = 1.0 if agree is not None else 0.75           # 无AI项时按可达上限归一
+    return round(min(1.0, max(0.0, raw / cap)), 2)
 
 
 def _late_pull(code):
@@ -1199,7 +1205,9 @@ def _build_close_worker():
             sh_px = next((i.get("price") for i in snap.get("indices", [])
                           if i.get("code") == "sh000001"), None)
             _cm = round(_apply_pred_calib("close_market", m["prob"]), 1)
-            _vm = _close_verdict("close_market", _cm)
+            _vm = _close_gated_verdict("close_market", _cm, m.get("breadth", 0.5),
+                                       ai_prob=m.get("ai_prob"),
+                                       heuristic_prob=m.get("heuristic_prob"))
             log_prediction("close_market",
                            {"prob": round(m["prob"], 1), "verdict": _vm,
                             "qcode": "sh000001", "key": "大盘(上证)",
@@ -1213,7 +1221,8 @@ def _build_close_worker():
                 if not code:
                     continue
                 _cs = round(_apply_pred_calib("close_stock", s.get("prob")), 1)
-                _vs = _close_verdict("close_stock", _cs)
+                _vs = _close_gated_verdict("close_stock", _cs,
+                                           (s.get("feats") or {}).get("breadth", 0.5))
                 log_prediction("close_stock",
                                {"prob": round(s.get("prob"), 1), "verdict": _vs,
                                 "qcode": _market_prefix(code) + code,
@@ -2038,18 +2047,30 @@ def _idx_gated_verdict(base):
 
 
 def _close_verdict(module, cal_prob):
-    """按【校准后】概率重判收盘模块方向(偏多/偏空/震荡), 与 _calib_close_view 同一口径。
-    收盘模块无弱信号门控(无 close_min_conf 配置), 故不转「观望」。"""
+    """按【校准后】概率重判收盘模块基础方向(偏多/偏空/震荡)。"""
     T = _clamp_threshold(module, _MODULE_THRESHOLDS.get(module, _TUNE_SPEC[module]["def_thr"]))
     return "偏多" if cal_prob >= T else ("偏空" if cal_prob <= 100 - T else "震荡")
 
 
+def _close_gated_verdict(module, cal_prob, breadth, ai_prob=None, heuristic_prob=None):
+    """v3.11.16: 收盘模块弱信号门控, 与 _calib_idx_view 同一思路 ——
+    有方向(偏多/偏空)但置信度 < close_min_conf(默认0.35)时转「观望」不判方向;
+    震荡本就无方向, 原样返回。置信度与展示层同一公式(宽度项带符号),
+    保证「回测总览方向与线上展示层一致」。"""
+    verdict = _close_verdict(module, cal_prob)
+    if verdict == "震荡":
+        return verdict
+    conf = _confidence(cal_prob, breadth, ai_prob=ai_prob, heuristic_prob=heuristic_prob)
+    min_conf = float(FCONFIG.get("close_min_conf", 0.35))
+    return verdict if conf >= min_conf else "观望"
+
+
 def _calib_close_view(payload):
     """尾盘预测(大盘+个股)的实时概率校准(复制后改, 不动 STATE)。
-    修复「校准后概率与方向自相矛盾」: prob 经 Platt 校准后, verdict 一律按【校准后】概率
-    重判(偏多/偏空/震荡), 与 _calib_idx_view 同一思路; 旧逻辑只校准 prob 不复判 verdict,
-    会出现「显示校准后48%却判定偏多」的矛盾。收盘模块无弱信号门控(无 close_min_conf 配置),
-    故不转「观望」; 落盘(见 _build_close_worker)也用同一函数, 保证回测总览方向与线上展示层一致。"""
+    prob 经 Platt 校准后, verdict 与 confidence 一律按【校准后】概率重算, 与 _calib_idx_view
+    同一思路; v3.11.16 起收盘模块同样做弱信号门控: 有方向但置信度不足(close_min_conf,
+    默认0.35)时展示「观望」, 消除「判定偏多却置信度31%」的自相矛盾; 落盘
+    (见 _build_close_worker)用同一 _close_gated_verdict, 保证回测总览方向与展示层一致。"""
     if not isinstance(payload, dict):
         return payload
     p = copy.deepcopy(payload)
@@ -2057,15 +2078,29 @@ def _calib_close_view(payload):
         m = p["market"]
         m["raw_prob"] = round(m.get("prob", 0) or 0, 1)
         m["prob"] = round(_apply_pred_calib("close_market", m["prob"]), 1)
-        m["verdict"] = _close_verdict("close_market", m["prob"])
+        m["verdict"] = _close_gated_verdict("close_market", m["prob"], m.get("breadth", 0.5),
+                                            ai_prob=m.get("ai_prob"),
+                                            heuristic_prob=m.get("heuristic_prob"))
         m["confidence"] = _confidence(m["prob"], m.get("breadth", 0.5),
                                       ai_prob=m.get("ai_prob"),
                                       heuristic_prob=m.get("heuristic_prob"))
+        # note 内嵌的置信度数字是构建时算的, 同步为重算值, 避免与徽章两处数字不一致
+        _nt = p.get("note") or ""
+        _i = _nt.find("置信度")
+        if _i >= 0:
+            _j = _nt.find(",", _i)
+            if _j > _i:
+                p["note"] = _nt[:_i] + f"置信度{m['confidence']:.2f}" + _nt[_j:]
+        if m["verdict"] == "观望":
+            _mc = float(FCONFIG.get("close_min_conf", 0.35))
+            p["note"] = (p.get("note", "") +
+                         f" ｜ 大盘置信度{m['confidence']:.2f}<{_mc:.2f}, 信号不足, 仅观望不判方向")
     for s in (p.get("stocks") or []):
         if isinstance(s, dict):
             s["raw_prob"] = round(s.get("prob", 0) or 0, 1)
             s["prob"] = round(_apply_pred_calib("close_stock", s["prob"]), 1)
-            s["verdict"] = _close_verdict("close_stock", s["prob"])
+            s["verdict"] = _close_gated_verdict("close_stock", s["prob"],
+                                                (s.get("feats") or {}).get("breadth", 0.5))
     return p
 
 

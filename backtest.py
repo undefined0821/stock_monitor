@@ -606,7 +606,9 @@ def _verify_one_pred(rec):
         if not a:
             return False            # 次一交易日K线尚未生成(未收盘), 留待下次
         hit = _verdict_hit(pred.get("verdict"), a["ret"], PRED_MODULES[module]["flat"])
-        rec["actual"] = {"price": a["price"], "ret": a["ret"], "hit": bool(hit),
+        # v3.11.16: 观望(弱信号门控)命中为 None, 保留 None 让统计剔除(与 idx_1h 同口径)
+        rec["actual"] = {"price": a["price"], "ret": a["ret"],
+                         "hit": hit if hit is None else bool(hit),
                          "actual_date": a.get("date"), "src": a.get("src", "kline")}
     elif module == "preopen_limitup":
         code = pred.get("qcode")
