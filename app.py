@@ -33,7 +33,7 @@ from calib import *     # 校准与调参(拆分自 app.py)
 from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 受保护策略加载器
 import store   # SQLite 存储层(运行时数据统一落库, 只依赖标准库)
 app = Flask(__name__)
-VERSION = "v3.11.17"   # 修回测统计by_verdict口径混入hit=None; 静态快照构建接入展示校准层
+VERSION = "v3.11.18"   # 剔除冻结假行情板块(宽度/均涨/共振统计)+置信度乘法衰减修0%悬崖
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 
@@ -260,18 +260,21 @@ def _market_context(snap=None):
 
 
 def _confidence(prob, breadth, ai_prob=None, heuristic_prob=None):
-    """置信度(0~1): 概率偏离中性 + 宽度方向一致性 + (启用AI时)启发式与AI方向一致性。
-    v3.11.16 修复「置信度与概率不匹配」: 宽度项旧版只取偏离幅度不看方向, 宽度极端偏空时
-    「偏多」判定的置信度反而被抬升; 现改为带符号(同向加分/反向扣分/中性不计), 并按可用
-    信号上限归一化, 使无AI参与时置信度与其他模块同一把尺。"""
+    """置信度(0~1): 概率偏离中性 × 宽度方向一致性因子 + (启用AI时)启发式与AI方向一致性。
+    v3.11.16 修复「置信度与概率不匹配」: 宽度项带符号(同向加分/反向扣分)。
+    v3.11.18 修复「置信度 0% 悬崖」: 旧版宽度反向罚项是加法(最多 -0.25), 概率贴近 50 时
+    raw 必然转负被钳到 0 —— 普跌日(宽度极低)即使模型偏多也恒显"置信度0%", 看似数据坏了。
+    现改为乘法因子: wf = 1 ± 0.5×宽度偏离, conf = 0.5×dist×wf / cap,
+    强一致时 conf=dist(上限1), 中性时 0.67×dist, 强矛盾时 dist/3(恒>0, 除非概率本身中性),
+    消除悬崖; 矛盾降信→弱信号门控观望(v3.11.16)的语义不变。"""
     dist = abs(prob - 50) / 50.0                      # 0~1, 越偏离50越果断
     ext = abs(breadth - 0.5) * 2.0                     # 0~1, 宽度偏离中性幅度
     bs = (breadth - 0.5) * (prob - 50)                 # 宽度与概率方向: 同向>0 反向<0
-    w_ext = 0.25 * ext if bs > 0 else (-0.25 * ext if bs < 0 else 0.0)
+    wf = 1.0 + (0.5 * ext if bs > 0 else (-0.5 * ext if bs < 0 else 0.0))
     agree = None
     if ai_prob is not None and heuristic_prob is not None:
         agree = 1.0 if (heuristic_prob >= 50) == (ai_prob >= 50) else 0.0
-    raw = 0.5 * dist + w_ext + (0.25 * agree if agree is not None else 0.0)
+    raw = 0.5 * dist * wf + (0.25 * agree if agree is not None else 0.0)
     cap = 1.0 if agree is not None else 0.75           # 无AI项时按可达上限归一
     return round(min(1.0, max(0.0, raw / cap)), 2)
 
@@ -725,7 +728,8 @@ def _build_pool_worker(force):
         sectors_pct = []
         for c, _nm in SECTOR_BOARDS:
             d = parse_row(sec_q.get(c.upper(), []))
-            if d["price"] > 0:
+            if d["price"] > 0 and not (d["vol"] == 0 and d["price"] == d["prevclose"]):
+                # v3.11.18: 剔除冻结假行情板块(price==prevclose 且零成交), 避免共振分被恒0假数据稀释
                 sectors_pct.append(d["pct"])
         sec_avg = sum(sectors_pct) / len(sectors_pct) if sectors_pct else 0
         sec_up_ratio = (sum(1 for p in sectors_pct if p > 0) / len(sectors_pct)) if sectors_pct else 0
@@ -1277,11 +1281,21 @@ def build_snapshot():
                             "pct": round(d["pct"], 2), "high": round(d["high"], 2),
                             "low": round(d["low"], 2)})
     sectors = []
+    _frozen_cnt = 0
     for c, nm in SECTOR_BOARDS:
         d = parse_row(q.get(c.upper(), []))
         if d["price"]:
-            sectors.append({"name": nm, "code": c, "pct": round(d["pct"], 2)})
+            # v3.11.18: 冻结假行情识别 —— 腾讯接口对部分中证行业指数(sz399929/30/31/36/37)
+            # 返回 price==prevclose 且成交量恒 0 的静态数据, 涨幅恒为 0.00。
+            # 若当平盘计入, 会把宽度分母灌水(12 板块 5 个恒 0)、板块均涨被稀释,
+            # 直接导致大盘置信度被压到 0%。标记 frozen, 统计时剔除。
+            frozen = (d["vol"] == 0 and d["price"] == d["prevclose"])
+            _frozen_cnt += 1 if frozen else 0
+            sectors.append({"name": nm, "code": c, "pct": round(d["pct"], 2),
+                            "frozen": frozen})
     sectors.sort(key=lambda x: x["pct"], reverse=True)
+    # 冻结板块不参与 宽度/板块均涨 统计; 若全部冻结(如盘前无行情)则回退旧口径避免空统计
+    _alive = sectors if _frozen_cnt >= len(sectors) else [s for s in sectors if not s.get("frozen")]
     _sec_pct_by_name = {s["name"]: s["pct"] for s in sectors}
 
     # 细分题材涨跌: 题材 = 成分股当日平均涨跌幅(实时, 来自腾讯行情);
@@ -1330,8 +1344,9 @@ def build_snapshot():
             continue
         sn = h.get("sector_name")
         h["sector_pct"] = _sec_pct_by_name.get(sn) if sn else None
-    up = [s for s in sectors if s["pct"] > 0]
-    avg = sum(s["pct"] for s in sectors) / len(sectors) if sectors else 0
+    up = [s for s in _alive if s["pct"] > 0]
+    _dn = [s for s in _alive if s["pct"] < 0]
+    avg = sum(s["pct"] for s in _alive) / len(_alive) if _alive else 0
     bias = ("多数板块上涨" if avg > 0.3
             else "多数板块下跌" if avg < -0.3 else "板块分化")
 
@@ -1356,7 +1371,7 @@ def build_snapshot():
         "beijing": now.strftime("%Y-%m-%d %H:%M:%S"), "weekday": now.weekday(),
         "trading": trading, "phase": phase, "is_weekday": wd,
         "indices": indices, "sectors": sectors, "themes": themes,
-        "sector_up_count": len(up), "sector_down_count": len(sectors) - len(up),
+        "sector_up_count": len(up), "sector_down_count": len(_dn),
         "sector_avg": round(avg, 2), "sector_bias": bias,
         "retail_pnl": retail_pnl,
         "holdings": holdings,
