@@ -1,7 +1,7 @@
 <!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>实时持仓监控平台 v3.11.14</title>
+<html lang="zh-CN" data-page-node-id="0D4R4ZahT8c8IJVHZS1OTL"><head data-page-node-id="1cL2eAKmNQhYo8357XVQXK"><meta charset="utf-8" data-page-node-id="cTRtydFhPZSENJDSEgA0bI">
+<meta name="viewport" content="width=device-width,initial-scale=1" data-page-node-id="EMWloIBD6lFV3mzRBiHF13">
+<title>实时持仓监控平台 v3.11.16</title>
 <style>
 :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--up:#ef5350;--down:#26a69a;
 --txt:#e6edf3;--mut:#8b949e;--gold:#e3b341;--blue:#58a6ff;--row-line:#21262d;--feed-bg:#11161d;--chart-bg:#0b0f14}
@@ -33,6 +33,15 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
   padding:3px 8px;border-radius:999px;border:1px solid var(--line);background:var(--row-line);color:var(--mut);white-space:nowrap}
 .sector-chip .sp{font-weight:700;font-variant-numeric:tabular-nums}
 .sector-chip .rk{opacity:.65;font-size:9.5px}
+/* v3.11.12: 持仓卡片标题与角落芯片分离, 避免长名称/双芯片溢出边框 */
+.card h3 .h-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chips{display:flex;flex-wrap:wrap;gap:4px 6px;margin:5px 0 2px}
+/* 大盘&板块网格: 各卡片自然高度, 不再被拉伸对齐产生底部大留白 */
+.grid.markets{align-items:start}
+/* v3.11.12: 尾盘预测卡片内部两栏铺满宽度, 消除右侧大片留白 */
+.close-grid{display:grid;grid-template-columns:minmax(220px,1fr) 1.5fr;gap:16px;align-items:start;margin-top:8px}
+.close-summary{font-size:13px}
+@media(max-width:560px){.close-grid{grid-template-columns:1fr}}
 .grp{margin:8px 0 2px;font-size:10.5px;letter-spacing:1.2px;color:var(--mut);text-transform:uppercase;border-top:1px solid var(--row-line);padding-top:7px}
 .row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--row-line);font-size:12.5px}
 .row .lbl{color:var(--mut)}
@@ -43,7 +52,7 @@ header h1{font-size:18px;margin:0;font-weight:700;letter-spacing:.3px}
 .kpi div{color:var(--mut);font-size:12px}
 .kpi b{display:block;font-size:clamp(15px,4.4vw,22px);font-weight:700;color:var(--txt);font-variant-numeric:tabular-nums;margin-top:2px;line-height:1.15;overflow-wrap:anywhere;word-break:break-word}
 @media(max-width:600px){.kpi{gap:8px}.kpi div{flex:1 1 42%;padding:8px 10px}.kpi b{font-size:clamp(14px,4.8vw,19px)}}
-.section{margin:30px 0 12px;font-size:16px;font-weight:600;letter-spacing:.3px;border-left:4px solid var(--blue);padding-left:12px}
+.section{margin:20px 0 10px;font-size:16px;font-weight:600;letter-spacing:.3px;border-left:4px solid var(--blue);padding-left:12px}
 .badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:6px;margin:2px 4px 2px 0}
 .b-yao{background:rgba(255,107,107,.16);color:#ff6b6b;border:1px solid #ff6b6b}
 .b-danger{background:rgba(239,83,80,.18);color:var(--up)}
@@ -109,115 +118,123 @@ td:first-child,th:first-child{text-align:left}
 .gv-toolbar .gv-btn:hover{opacity:.88}
 .eye:hover{border-color:var(--blue)}
 /* v3.11.1: 高开回测 / 预测回测总览 并排; 窄屏自动堆叠为单列 */
-.gv-twocol{} /* 容器样式内联(两列 grid), 此处仅占位 */
+.gv-twocol{align-items:start} /* 两列各自自然高度, 不拉伸对齐产生内部留白 */
 @media(max-width:900px){.gv-twocol{grid-template-columns:1fr !important}}
 .masked{color:var(--mut);letter-spacing:2px}
 .minichart{width:100%;height:130px;margin-top:10px;border-radius:8px;background:var(--chart-bg)}
 </style></head>
-<body>
-<header>
-  <h1>📊 实时持仓监控平台</h1>
-  <span id="clock" class="tag">--</span>
-  <span id="status" class="tag off">--</span>
-  <span class="tag" id="phase">--</span>
-  <button id="eyeBtn" class="eye" title="隐藏/显示金额">👁</button>
-  <button id="themeBtn" class="eye" title="切换白天/夜间主题">🌙</button>
+<body data-page-node-id="hCQOaEi6P6sH3NIkprPakk">
+<header data-page-node-id="Huttuqyy5oCZejGSbxG0Uv">
+  <h1 data-page-node-id="QOdqAvw6V8YhD4Lw8vn6L8">📊 实时持仓监控平台</h1>
+  <span id="clock" class="tag" data-page-node-id="XnZgEWnXe1ALfyctXVAfM9">--</span>
+  <span id="status" class="tag off" data-page-node-id="jHLxRxaDPEnzTYHGjOeuTr">--</span>
+  <span class="tag" id="phase" data-page-node-id="6GRe9kfFurWgKppxfdApbn">--</span>
+  <button id="eyeBtn" class="eye" title="隐藏/显示金额" data-page-node-id="tOUlGOCsC8hQYNbQkN0eYQ">👁</button>
+  <button id="themeBtn" class="eye" title="切换白天/夜间主题" data-page-node-id="8ZJzPvn0KawJRFR2UE3kgS">🌙</button>
 </header>
-<div class="wrap">
+<div class="wrap" data-page-node-id="Hz7XHJCVy5Zcv6QNIZu1nT">
 
   <!-- 0. 隐私提示 -->
-  <div id="privacyTip" class="note" style="margin:6px 0 0;display:none">🔒 已隐藏金额（持仓市值/盈亏/成本）。点击右上角 👁 恢复显示。</div>
+  <div id="privacyTip" class="note" style="margin:6px 0 0;display:none" data-page-node-id="Z90egQM8wNAZxEA9JxVZp3">🔒 已隐藏金额（持仓市值/盈亏/成本）。点击右上角 👁 恢复显示。</div>
 
   <!-- 1. 异动提醒置顶 -->
-  <div class="section" style="margin-top:6px">🚨 异动提醒（实时）</div>
-  <div class="feed" id="feed" style="max-height:180px"><div class="note">暂无预警</div></div>
+  <div class="section" style="margin-top:6px" data-page-node-id="VTm4mzvgBx0sb1308HDcoQ">🚨 异动提醒（实时）</div>
+  <div class="feed" id="feed" style="max-height:180px" data-page-node-id="KqnyDL4kwAZV5ql4ZcnkkA"><div class="note" data-page-node-id="8QpNWvh3gLwDHn3QoEC0lB">暂无预警</div></div>
 
   <!-- 2. 上证指数1小时趋势预测 -->
-  <div class="section">📈 上证指数 1 小时后趋势预测 <span class="code">每2分钟更新 · 含AI权重</span></div>
-  <div class="card" id="idxforecast"><div class="note">加载中…</div>
-    <button onclick="manual('idx')" style="margin-top:10px;background:var(--blue);color:#06121f;border:none;padding:7px 14px;border-radius:6px;cursor:pointer">手动预测</button>
+  <div class="section" data-page-node-id="qAKPMjKW4cL1czJyLfhy9I">📈 上证指数 1 小时后趋势预测 <span class="code" data-page-node-id="u7DB31Vu2GLgau9Rgfwnyh">每2分钟更新 · 含AI权重</span></div>
+  <div class="card" id="idxforecast" data-page-node-id="IZEsKHFZoAF3wIPRo9874j"><div class="note" data-page-node-id="nC3K7ytWJdCsXfZx4EvjFJ">加载中…</div>
+    <button onclick="manual('idx')" style="margin-top:10px;background:var(--blue);color:#06121f;border:none;padding:7px 14px;border-radius:6px;cursor:pointer" data-page-node-id="PEDlIFPu6MXQTsITHa1nB1">手动预测</button>
   </div>
 
   <!-- 3. 9:25:02 开盘前涨停趋势(自动扫描5只未持有) -->
-  <div class="section">🔥 开盘前涨停趋势 <span class="code">9:25:02首扫, 持续到9:29 每分钟扫描主板, 自动选5只未持有</span></div>
-  <div class="card" id="preopen"><div class="note">尚未生成（交易日 09:25:02 起每分钟自动更新；可点按钮手动触发）</div>
-    <button onclick="manual('preopen')" style="margin-top:10px;background:var(--blue);color:#06121f;border:none;padding:7px 14px;border-radius:6px;cursor:pointer">手动扫描</button>
+  <div class="section" data-page-node-id="u7Z970CVGEZJwg2ExE5Gri">🔥 开盘前涨停趋势 <span class="code" data-page-node-id="mX3I8sBps48K06ga34ZL3S">9:25:02首扫, 持续到9:29 每分钟扫描主板, 自动选5只未持有</span></div>
+  <div class="card" id="preopen" data-page-node-id="EkENsamTEUz55PX9AMndZU"><div class="note" data-page-node-id="VfM5MpqWNnKAEeKqR37bsG">尚未生成（交易日 09:25:02 起每分钟自动更新；可点按钮手动触发）</div>
+    <button onclick="manual('preopen')" style="margin-top:10px;background:var(--blue);color:#06121f;border:none;padding:7px 14px;border-radius:6px;cursor:pointer" data-page-node-id="GJkUkHYchfVt1ON29FGxUN">手动扫描</button>
   </div>
 
   <!-- 4. 我的持仓 -->
-  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span>💼 我的持仓（撤离/补仓/止盈/压力位）</span>
-    <button onclick="enterEdit()" style="margin-left:auto;background:var(--blue);color:#06121f;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">✏️ 管理持仓</button>
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap" data-page-node-id="AUCAPthyjfOwq6rXbfbUHD">
+    <span data-page-node-id="RhDl5FgxykB3dghHuQvkUF">💼 我的持仓（撤离/补仓/止盈/压力位）</span>
+    <button onclick="enterEdit()" style="margin-left:auto;background:var(--blue);color:#06121f;border:none;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600" data-page-node-id="YyBBsLONUGmOWB2K1noItf">✏️ 管理持仓</button>
   </div>
-  <div class="kpi">
-    <div>总市值<b id="tv">--</b></div>
-    <div>浮动盈亏<b id="tp">--</b></div>
-    <div>收益率<b id="tpp">--</b></div>
-    <div>当日总盈亏<b id="td">--</b></div>
-    <div>板块强弱<b id="sb">--</b></div>
+  <div class="kpi" data-page-node-id="m9L6yAc5qbNDod7EAU4qUf">
+    <div data-page-node-id="e5jeGGIF4W4gnZmJjES4IV">总市值<b id="tv" data-page-node-id="bjtLDACOrH9LUQohPWi6YN">--</b></div>
+    <div data-page-node-id="ow9GRr7VpvEP7R3FFASyIb">浮动盈亏<b id="tp" data-page-node-id="uKn3EtB6l3hCkx78QhFakx">--</b></div>
+    <div data-page-node-id="r8HCFPbKE9pP6SxbXsQmJO">收益率<b id="tpp" data-page-node-id="cDCGZyTfNmMr4CNWVCs4NP">--</b></div>
+    <div data-page-node-id="cQIHs3C3wXh7EAhSgdBaLD">当日总盈亏<b id="td" data-page-node-id="fBS9dHPwsTaCBead4f8LZW">--</b></div>
+    <div title="12个中证行业板块的平均涨跌幅，反映市场整体强弱" data-page-node-id="uH430QkfPyHKrnnSKU1wE8">板块均涨<b id="sb" data-page-node-id="FlduhMPxGLleN3xM0bpLgQ">--</b></div>
   </div>
-  <div class="grid" id="holdings"></div>
-  <div class="card" id="pfEditor" style="display:none">
-    <h3>✏️ 编辑持仓 <span class="note" style="font-weight:400">仅可改 股票代码 / 成本 / 股数；每次保存视为"今日有买入动作"，当日盈亏即按成本计算（之前买入且未改动的按昨收）</span></h3>
-    <div id="pfRows"></div>
-    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
-      <button onclick="pfAdd()" style="background:var(--card);color:var(--txt);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px">➕ 新增一行</button>
-      <button onclick="pfSave()" style="background:var(--up);color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600">💾 保存</button>
-      <button onclick="pfCancel()" style="background:var(--card);color:var(--mut);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px">取消</button>
+  <div class="grid" id="holdings" data-page-node-id="kOkeoD9KoPcabK5S8JuHBh"></div>
+  <div class="card" id="pfEditor" style="display:none" data-page-node-id="sUYk88ysb7Ojcccc5Ccrnm">
+    <h3 data-page-node-id="q4Mk9BMjjy1yUmicuxx4YR">✏️ 编辑持仓 <span class="note" style="font-weight:400" data-page-node-id="Id3RFTX8ehkLEbtFVn71XJ">仅可改 股票代码 / 成本 / 股数；每次保存视为"今日有买入动作"，当日盈亏即按成本计算（之前买入且未改动的按昨收）</span></h3>
+    <div id="pfRows" data-page-node-id="H8fGzCHYMrka9Fagszl612"></div>
+    <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap" data-page-node-id="Ge2KSxhSEWLFocwTi79RWW">
+      <button onclick="pfAdd()" style="background:var(--card);color:var(--txt);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px" data-page-node-id="1TcaUZu5Hv6DI2nXk9s8ug">➕ 新增一行</button>
+      <button onclick="pfSave()" style="background:var(--up);color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600" data-page-node-id="yrgbHw5aCcohiC0pZQ9qAt">💾 保存</button>
+      <button onclick="pfCancel()" style="background:var(--card);color:var(--mut);border:1px solid var(--line);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px" data-page-node-id="mfl8lfrKZPtqW3e4hY7QG8">取消</button>
     </div>
-    <div id="pfMsg" class="note" style="margin-top:8px"></div>
+    <div id="pfMsg" class="note" style="margin-top:8px" data-page-node-id="k9RMBwbO1ReZQfkwBeQzRz"></div>
   </div>
 
   <!-- 5. 大盘 & 板块 -->
-  <div class="section">🌐 大盘 & 板块资金动向</div>
-  <div class="grid">
-    <div class="card"><h3>三大指数</h3><table id="idx"></table></div>
-    <div class="card"><h3>题材涨跌（细分主线） <span class="code" id="sb2"></span></h3>
-      <div id="sectors" style="max-height:300px;overflow:auto"></div>
-      <div class="note" id="bias"></div>
+  <div class="section" data-page-node-id="shiDMGMN6UbHBnxSPqwCRk">🌐 大盘 & 板块资金动向</div>
+  <div class="grid markets" data-page-node-id="KJuamvCkUgrCl5bouI1uhL">
+    <div class="card" data-page-node-id="9RdW0lDrvzYTsl8py6hU3k"><h3 data-page-node-id="Aps1FezgV8b6BwVRIdRQv5">三大指数</h3><table id="idx" data-page-node-id="R0SuefvOshffBjivRBfOlb"></table></div>
+    <div class="card" data-page-node-id="yNHvP94RjM0ZQwRVmAbYpu"><h3 data-page-node-id="9bHDjbMDRwR86HVOhOBUGC">题材涨跌（细分主线） <span class="code" id="sb2" data-page-node-id="2cuhQrUMy2vMLJ9Eboo7NP"></span></h3>
+      <div id="sectors" style="max-height:260px;overflow:auto" data-page-node-id="1Ye5RJtzymomzecv6X3lAR"></div>
+      <div class="note" id="bias" data-page-node-id="lGkTwLv0ahO89mxb18JXHo"></div>
+      <div class="note" id="devSummary" data-page-node-id="hzqtOMYQsDKRHcFVHa4sGL"></div>
     </div>
-    <div class="card" id="retailCard" style="border-color:var(--gold)"><h3>国证2000 小盘涨跌（散户代理）</h3><div id="retail"><div class="note">加载中…</div></div></div>
-    <div class="card" id="driversCard"><h3>主题材拉/踩指数 <span class="code">每10分钟检测</span></h3><div id="drivers"><div class="note">加载中…</div></div>
-      <button onclick="manual('drivers')" style="margin-top:8px;background:var(--blue);color:#06121f;border:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px">立即检测</button>
-    </div>
+    <div class="card" data-page-node-id="dwKiA2XwBD1FNcag7qULXm"><h3 data-page-node-id="biR2LCNtg1JCqO8f7XN2wQ">板块涨跌（12 中证行业）</h3><div id="sectorBoards" data-page-node-id="37uOFxzvbzdYaZKCPPspV2"></div></div>
+    <div class="card" id="retailCard" style="border-color:var(--gold)" data-page-node-id="wPTByr5iQlAZiEEwl3TTgO"><h3 data-page-node-id="GPiHExbFpZYcImBCFnK95e">国证2000 小盘涨跌（散户代理）</h3><div id="retail" data-page-node-id="RLAjIEJfxioGYxIfmEggLV"><div class="note" data-page-node-id="gbLdI8y72Xz7AWQDl6uuNm">加载中…</div></div></div>
   </div>
 
   <!-- 6. 尾盘预测 -->
-  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span>🔮 尾盘预测：下个交易日涨跌概率</span>
-    <span class="code">交易日 14:50 自动预测 · 可随时手动刷新</span>
-    <button id="closeRefreshBtn" onclick="manual('close')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto">🎯 立即预测</button>
-    <span id="closeRefreshTip" class="code">点击立即重新计算一次尾盘预测，一般需 10~30 秒</span>
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap" data-page-node-id="WDNruqB1YirKlaZUOSWoVE">
+    <span data-page-node-id="ibu2gkV63ikCs0QmsMSFFr">🔮 尾盘预测：下个交易日涨跌概率</span>
+    <span class="code" data-page-node-id="w78xfdDC1CFIT4RZ10sR7N">交易日 14:50 自动预测 · 可随时手动刷新</span>
+    <button id="closeRefreshBtn" onclick="manual('close')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto" data-page-node-id="g9d3yckGixLCgjLv60pUqt">🎯 立即预测</button>
+    <span id="closeRefreshTip" class="code" data-page-node-id="XOURPVGqCZhQCu6r9Ader6">点击立即重新计算一次尾盘预测，一般需 10~30 秒</span>
   </div>
-  <div class="card" id="close"><div class="note">尚未生成（交易日 14:50 自动预测；可点上方按钮手动触发）</div></div>
+  <div class="card" id="close" data-page-node-id="QgbUHWRchuDgXlmKnuTHf8"><div class="note" data-page-node-id="GjRDvp6ypTtKuMxqZLi9DR">尚未生成（交易日 14:50 自动预测；可点上方按钮手动触发）</div></div>
 
   <!-- 7. 尾盘高开潜力 -->
-  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <span>🚀 尾盘高开潜力（下个交易日开盘）</span>
-    <span class="code">尾盘前8分钟自动扫描主板(排除涨停), 选5支高开概率最高</span>
-    <button id="gapupBtn" onclick="manual('gapup')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto">🎯 立即检测</button>
-    <span id="gapupTip" class="code">点击立即全市场扫描主板，约需 1~3 分钟</span>
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap" data-page-node-id="97kVPVgQyECJsPBErjLY1a">
+    <span data-page-node-id="VPYlgRSUsRrgHYVNU7RY8D">🚀 尾盘高开潜力（下个交易日开盘）</span>
+    <span class="code" data-page-node-id="h8Hrh5RUZgq0OTMAONU5oN">尾盘前8分钟自动扫描主板(排除涨停), 选5支高开概率最高</span>
+    <button id="gapupBtn" onclick="manual('gapup')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto" data-page-node-id="oorB2izewlt0iRvHt7Dx3O">🎯 立即检测</button>
+    <span id="gapupTip" class="code" data-page-node-id="wIkSaoAzInRPbhpe9BiXqk">点击立即全市场扫描主板，约需 1~3 分钟</span>
   </div>
-  <div class="card" id="gapup"><div class="note">尚未生成（交易日 14:52 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
+  <div class="card" id="gapup" data-page-node-id="oIkn9cGzbveeRcLgiQ6S3y"><div class="note" data-page-node-id="SCyIEa5QPx3f0eI2EY25A4">尚未生成（交易日 14:52 起自动扫描；也可随时点击上方按钮立即检测）</div></div>
+
+  <!-- 7.5 选股池(v3.12): 每日全市场扫描主板(逻辑封装在受保护载荷, 前端不展示判定细节) -->
+  <div class="section" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap" data-page-node-id="mhYHEtDNiWZIpka4HlZPRa">
+    <span data-page-node-id="zFden3zyQzwtXSRyCAuy1z">🎯 选股池（每日全市场扫描）</span>
+    <span class="code" data-page-node-id="TG2LZAu7FEAyB9NgEJ6w0G">主板 · 综合量化打分（逻辑加密）</span>
+    <button id="poolBtn" onclick="manual('stock_pool')" style="background:var(--blue);color:#06121f;border:none;padding:6px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;margin-left:auto" data-page-node-id="Ah4Y0hyKa1QggvBkH8jXWx">🔍 立即扫描</button>
+    <span id="poolTip" class="code" data-page-node-id="0FrvF2R9XUFTPgeb8sZGRa">点击立即全市场扫描主板（已预热本地日线库，数秒出结果）</span>
+  </div>
+  <div class="card" id="stockpool" data-page-node-id="NpWGAP3LK4fAJLenFAykU9"><div class="note" data-page-node-id="vmO56O0Y9KYksEPVEvhOr8">加载中…</div></div>
   <!-- 7. 回测面板(v3.11.1): 高开回测 与 预测回测总览 并排 -->
-  <div class="gv-twocol" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">
-    <div class="gv-col">
+  <div class="gv-twocol" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start" data-page-node-id="owxNw7faUf2pwpvez39vod">
+    <div class="gv-col" data-page-node-id="ywbAfgAbezKapOWRpll4CO">
   <!-- 7.1 高开回测(v3.4) -->
-  <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
-    <span>📊 高开回测（推荐→开盘实测）</span>
+  <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px" data-page-node-id="K4iKBGYETfne5CyfZcv1A1">
+    <span data-page-node-id="XXD1QnVQ4pUABlyHDS83J5">📊 高开回测（推荐→开盘实测）</span>
   </div>
-  <div class="card gv-card" id="gapverify"><div class="note">加载中…</div></div>
+  <div class="card gv-card" id="gapverify" data-page-node-id="JFHR7NMr4WezqGXsl9Ojz5"><div class="note" data-page-node-id="Ufd1FDfY8C8FisOAO8KwJX">加载中…</div></div>
     </div>
-    <div class="gv-col">
+    <div class="gv-col" data-page-node-id="O2WMzTd4gvz3p0LCMn3AqH">
   <!-- 7.2 预测回测总览(v3.10): 上证1小时/尾盘大盘/尾盘个股/盘前涨停/尾盘高开潜力 的命中率与校准偏差 -->
-  <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px">
-    <span>🎯 预测回测总览（各模块命中率 & 概率校准）</span>
+  <div class="section gv-section" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:18px 0 8px;font-size:14px" data-page-node-id="QQAdtJx8VyUEKrnD3i9F6z">
+    <span data-page-node-id="sRZDlpGjV7y43pfiN5mE4z">🎯 预测回测总览（各模块命中率 & 概率校准）</span>
   </div>
-  <div class="card gv-card" id="predstats"><div class="note">加载中…</div></div>
+  <div class="card gv-card" id="predstats" data-page-node-id="6VBzEicH8RTyW0oZUEpii2"><div class="note" data-page-node-id="tGwhgRXluoszi1G1xTufTV">加载中…</div></div>
     </div>
   </div>
-  <div class="note">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b>不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
-  <div class="note" style="text-align:center;margin-top:22px">实时持仓监控平台 <b id="ver">v3.11.14</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
+  <div class="note" data-page-node-id="7T5gEcaBYDOQUjT2AtjFFp">数据来源：腾讯财经实时行情（真实数据）。本平台为个人监控与异动辅助工具，所有预测/概率均基于规则与统计模型，<b data-page-node-id="kEGnE4oAOMF7zC7Z9pXmtA">不构成投资建议</b>。仅在交易日(周一~周五)运行。</div>
+  <div class="note" style="text-align:center;margin-top:22px" data-page-node-id="K5P0K1rGVV9CikQKyRz2YB">实时持仓监控平台 <b id="ver" data-page-node-id="m7Y88urOeW9mD1HrNhek3r">v3.11.16</b> ｜ 数据来源：腾讯财经实时行情（真实数据）</div>
 </div>
 <script>
 const fmt=(n,d=2)=>n==null||isNaN(n)?'--':Number(n).toLocaleString('zh-CN',{minimumFractionDigits:d,maximumFractionDigits:d});
@@ -294,7 +311,9 @@ function render(d){
   const td=document.getElementById('td');
   td.textContent=showMoney?sign(d.total_day_pnl)+'元 ('+sign(d.total_day_pnl_pct)+'%)':'***';
   td.className=showMoney?cls(d.total_day_pnl):'masked';
-  document.getElementById('sb').textContent=d.sector_bias||'--';
+  const sbEl=document.getElementById('sb');
+  if(d.sector_avg!==undefined&&d.sector_avg!==null){sbEl.textContent=sign(d.sector_avg)+'%';sbEl.className=d.sector_avg>=0?'up':'down';}
+  else sbEl.textContent='--';
 
   // 异动提醒(置顶)
   const F=document.getElementById('feed');
@@ -353,9 +372,13 @@ function render(d){
     const pcd=cls(h.pct);     // 当日涨跌%: 以昨收为基准(独立于卡片主色)
     // 角落题材芯片: 所属细分题材名 + 题材平均涨跌幅 + 题材强弱排名(命中题材即自动显示)
     const secChip = h.theme_name ? `<span class="sector-chip" title="所属题材涨跌(成分股平均)">${h.theme_name} <span class="sp ${cls(h.theme_pct)}">${sign(h.theme_pct)}%</span>${h.theme_rank?'<span class="rk">'+h.theme_rank+'/'+(h.theme_total||'')+'</span>':''}</span>` : '';
+    let secBrChip = (h.sector_name && h.sector_pct!==null && h.sector_pct!==undefined) ? `<span class="sector-chip" title="所属板块(中证行业)今日涨跌幅">${h.sector_name} <span class="sp ${cls(h.sector_pct)}">${sign(h.sector_pct)}%</span></span>` : '';
+    // 题材名与板块名相同时只渲染一个, 避免卡片右上角出现重复标签
+    if(h.theme_name && h.sector_name && h.theme_name===h.sector_name) secBrChip='';
     let badges=(h.anomalies||[]).map(a=>'<span class="badge b-'+a.level+'">'+a.text+'</span>').join('');
     H.innerHTML+=`<div class="card ${pc}">
-      <h3><span>${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span>${secChip}</h3>
+      <h3><span class="h-name">${h.name} <span class="code">${h.market.toUpperCase()}${h.code}</span></span></h3>
+      ${(secChip||secBrChip)?`<div class="chips">${secChip}${secBrChip}</div>`:''}
       <div style="margin:2px 0 4px"><span class="px ${pc}">${fmt(h.price)}</span><span class="pct ${pcd}">${sign(h.pct)}%</span></div>
       <div class="grp">盈亏概览</div>
       <div class="row"><span class="lbl">持仓市值</span><span class="${showMoney?'':'masked'}">${mval(h.value)}</span></div>
@@ -378,12 +401,39 @@ function render(d){
   (d.indices||[]).forEach(i=>{it+=`<tr><td>${i.name}</td><td>${fmt(i.price)}</td><td class="${cls(i.pct)}">${sign(i.pct)}%</td></tr>`;});
   document.getElementById('idx').innerHTML=it;
   // 题材(细分)涨跌: 取代宽泛的 12 个中证行业, 更贴近个股关联主线
+  // v3.11.13: 原「主题材拉/踩指数」与本卡同源(同一份 themes 数据), 题材名重复出现,
+  // 故合并 —— 每个题材附「相对上证偏离」标记, 卡片底部给一句拉/踩摘要, 不再单列一张卡。
   const ths=d.themes||[];
   const tavg=ths.length?ths.reduce((a,b)=>a+b.pct,0)/ths.length:0;
   document.getElementById('sb2').textContent='↑'+ths.filter(x=>x.pct>0).length+' ↓'+ths.filter(x=>x.pct<0).length+' 均值'+sign(Math.round(tavg*100)/100)+'%';
+  // 相对上证偏离度(拉/踩判定基准)
+  const _sh=(d.indices||[]).find(i=>i.code==='sh000001');
+  const _base=_sh?_sh.pct:0;
+  const DEV_TH=0.8;   // 偏离≥0.8个百分点视为明显拉动/压制
+  const devs=ths.map(x=>({name:x.name,dev:Math.round((x.pct-_base)*100)/100}));
+  const pullers=devs.filter(x=>x.dev>=DEV_TH).sort((a,b)=>b.dev-a.dev).slice(0,3);
+  const pressers=devs.filter(x=>x.dev<=-DEV_TH).sort((a,b)=>a.dev-b.dev).slice(0,3);
   let s='';
-  ths.forEach(x=>{const w=Math.min(Math.abs(x.pct)*6,100);s+=`<div style="margin:5px 0"><span style="display:inline-block;width:72px">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span><span class="note" style="margin-left:4px">${x.n}股</span></div>`;});
+  ths.forEach(x=>{
+    const w=Math.min(Math.abs(x.pct)*6,100);
+    const dv=Math.round((x.pct-_base)*100)/100;
+    const dvTag=Math.abs(dv)>=DEV_TH
+      ? `<span class="${dv>=0?'up':'down'}" style="margin-left:4px;font-size:11px" title="相对上证偏离 ${dv>0?'+':''}${dv} 个百分点">${dv>=0?'▲':'▼'}${dv>0?'+':''}${dv}</span>` : '';
+    s+=`<div style="margin:5px 0"><span title="${x.name}" style="display:inline-block;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">${x.name}</span><span class="bar ${x.pct>=0?'up':''}" style="width:${w}px"></span> <span class="${cls(x.pct)}">${sign(x.pct)}%</span>${dvTag}<span class="note" style="margin-left:4px">${x.n}股</span></div>`;
+  });
   document.getElementById('sectors').innerHTML=s;
+  // 拉/踩摘要(替代原独立卡片)
+  const dsum=document.getElementById('devSummary');
+  if(dsum){
+    const pTxt=pullers.length?pullers.map(x=>`<b class="up">${x.name} +${x.dev}</b>`).join(' '):'<span class="note">无</span>';
+    const qTxt=pressers.length?pressers.map(x=>`<b class="down">${x.name} ${x.dev}</b>`).join(' '):'<span class="note">无</span>';
+    dsum.innerHTML=`相对上证(${sign(_base)}%)：🟢拉 ${pTxt} ｜ 🔴踩 ${qTxt}<br><span style="opacity:.7">偏离≥${DEV_TH}个百分点视为明显拉动/压制</span>`;
+  }
+  // 12 个中证行业板块涨跌榜(板块联动总览): 板块均涨的明细支撑
+  const secs=d.sectors||[];
+  let sbHtml='';
+  secs.forEach(x=>{sbHtml+='<div style="margin:4px 0;display:flex;justify-content:space-between;gap:8px"><span>'+x.name+'</span><span class="'+cls(x.pct)+'">'+sign(x.pct)+'%</span></div>';});
+  document.getElementById('sectorBoards').innerHTML=sbHtml;
   document.getElementById('bias').textContent=d.sector_bias;
   // 散户今日平均盈亏(国证2000近似) —— 紧凑版
   const rt=document.getElementById('retail');
@@ -395,16 +445,6 @@ function render(d){
     </div>
     <div class="note">以国证2000(小盘股)当日涨跌幅近似散户平均盈亏, 仅供参考</div>`;
   } else rt.innerHTML='<div class="note">散户平均盈亏数据未获取</div>';
-  // 主题材拉/踩指数
-  const dv=document.getElementById('drivers');
-  if(d.sector_drivers){const dd=d.sector_drivers;
-    const pull=(dd.pullers&&dd.pullers.length)?dd.pullers.map(s=>`<span class="badge b-up">▲ ${s.name} ${sign(s.pct)}% ·偏离+${fmt(s.dev)}%</span>`).join(' '):'<span class="badge b-muted">暂无明显拉动板块</span>';
-    const pres=(dd.pressers&&dd.pressers.length)?dd.pressers.map(s=>`<span class="badge b-down">▼ ${s.name} ${sign(s.pct)}% ·偏离${fmt(s.dev)}%</span>`).join(' '):'<span class="badge b-muted">暂无明显压制板块</span>';
-    dv.innerHTML=`<div class="note">${dd.index_name} ${sign(dd.index_pct)}% ｜ ${dd.move} ｜ ${dd.time} 更新</div>
-      <div style="margin:8px 0"><b class="up">🟢 拉指数</b><br>${pull}</div>
-      <div style="margin:8px 0"><b class="down">🔴 踩指数</b><br>${pres}</div>
-      <div class="note">${dd.note}</div>`;
-  } else dv.innerHTML='<div class="note">暂未检测(9:15后每10分钟更新, 可点按钮立即检测)</div>';
   // 尾盘
   if(d.close){let r=`<div class="note">${d.close.time} 生成 ｜ ${d.close.note}${d.close.ai_used?' ｜ <b style="color:var(--info)">AI模型已参与</b>':''}</div>`;
     const m=d.close.market;
@@ -414,15 +454,17 @@ function render(d){
     const mBr = m.breadth!=null ? m.breadth : 0.5;
     const mLt = m.late!=null ? m.late : 0;
     const mRt = m.retail!=null ? m.retail : 0;
-    r+=`<div class="row" style="border:none"><span>大盘明日看涨概率</span><span class="prob ${probcls(m.prob)}">${fmt(m.prob,1)}% (${m.verdict}) <span class="badge ${cmBadge}" style="margin-left:6px">置信度${cmPct}%</span></span></div>`;
-    r+=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin:4px 0 8px;font-size:13px;opacity:0.85">
+    let sum=`<div class="row" style="border:none"><span>大盘明日看涨概率</span><span class="prob ${probcls(m.prob)}">${fmt(m.prob,1)}% (${m.verdict}) <span class="badge ${cmBadge}" style="margin-left:6px">置信度${cmPct}%</span></span></div>`;
+    sum+=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 2px;font-size:13px;opacity:0.85">
         <span>📊 宽度: <b>${(mBr*100).toFixed(0)}%</b></span>
         <span>🚀 尾盘动向: <b class="${cls(mLt)}">${mLt>=0?'+':''}${mLt.toFixed(2)}%</b></span>
         <span>🧩 小盘(国证2000): <b class="${cls(mRt)}">${mRt>=0?'+':''}${mRt.toFixed(2)}%</b></span>
       </div>`;
-    r+='<table><tr><th>持仓</th><th>概率</th><th>倾向</th></tr>';
-    d.close.stocks.forEach(x=>{r+=`<tr><td>${x.name}</td><td class="prob ${probcls(x.prob)}">${fmt(x.prob,1)}%</td><td>${x.verdict}</td></tr>`;});
-    r+='</table>';document.getElementById('close').innerHTML=r;}
+    let tbl='<table><tr><th>持仓</th><th>概率</th><th>倾向</th></tr>';
+    d.close.stocks.forEach(x=>{tbl+=`<tr><td>${x.name}</td><td class="prob ${probcls(x.prob)}">${fmt(x.prob,1)}%</td><td>${x.verdict}</td></tr>`;});
+    tbl+='</table>';
+    r+=`<div class="close-grid"><div class="close-summary">${sum}</div><div class="close-stocks">${tbl}</div></div>`;
+    document.getElementById('close').innerHTML=r;}
   // 尾盘高开潜力
   const gu=document.getElementById('gapup');
   if(d.gapup){const g=d.gapup;
@@ -501,8 +543,6 @@ function renderPredStats(s){
   const keys=Object.keys(PRED_LABELS).filter(k=>mods[k]);
   // v3.11.0: 顶部工具条(自动调参操作 + 门控说明)
   const head='<div class="gv-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;flex-wrap:wrap">'
-    +'<button class="gv-btn" onclick="tuneNow(this)">🔧 重新调参</button>'
-    +'<button class="gv-btn" onclick="tuneReset()">↺ 恢复默认</button>'
     +`<span class="note" style="margin:0">自动调参随样本累积生效：阈值≥${tmeta.min_thr||15}，权重≥${tmeta.min_w||50}（权重多、需更多样本防过拟合）</span>`
     +'</div>';
   if(!keys.length){
@@ -565,10 +605,8 @@ function renderPredStats(s){
   if(anyBias) r+='<div class="note" style="margin-top:6px">提示: 偏差为"平均预测概率 − 实际命中率"。偏差>5pp 说明该模块概率过度自信，样本≥12 后可启用概率校准自动修正。</div>';
   box.innerHTML=head+r;
 }
-function tuneNow(b){if(b){b.disabled=true;b.textContent='⏳ 调参中…';} fetch('/api/tune',{method:'POST'}).then(()=>loadPredStats()).finally(()=>{if(b){b.disabled=false;b.textContent='🔧 重新调参';}});}
-function tuneReset(){fetch('/api/tune_reset',{method:'POST'}).then(()=>loadPredStats()).catch(()=>{});}
 function loadPredStats(){fetch('/api/pred_stats').then(r=>r.json()).then(renderPredStats).catch(()=>{});}
-function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();}
+function load(){fetch('/api/snapshot').then(r=>r.json()).then(render).catch(()=>{});fetch('/api/gapup/log').then(r=>r.json()).then(renderGapVerify).catch(()=>{});loadPredStats();loadStockPool();}
 function manual(t){
   if(t==='close'){
     const b=document.getElementById('closeRefreshBtn');
@@ -592,8 +630,82 @@ function manual(t){
           if(tip)tip.textContent='点击立即全市场扫描主板，约需 1~3 分钟';},800);
       }).catch(()=>{if(b){b.disabled=false;b.style.opacity=1;b.textContent='🎯 立即检测';}});
     }
+  }else if(t==='stock_pool'){
+    const b=document.getElementById('poolBtn');
+    const tip=document.getElementById('poolTip');
+    if(b&&!b.disabled){
+      b.disabled=true;b.style.opacity=.6;b.textContent='⏳ 扫描中…';
+      if(tip)tip.textContent='正在全市场扫描主板（约 1~3 分钟），完成后自动显示推荐结果…';
+      fetch('/api/stock_pool?rescan=1').then(()=>{
+        // 轮询直到扫描结束(后台线程扫描约1~3分钟, 期间持续显示进度)
+        const iv=setInterval(()=>{
+          fetch('/api/stock_pool').then(r=>r.json()).then(p=>{
+            renderStockPool(p);
+            if(!p.scanning){
+              clearInterval(iv);
+              if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}
+              if(tip)tip.textContent='点击立即全市场扫描主板，约需 1~3 分钟';
+            }
+          }).catch(()=>{});
+        }, 5000);
+      }).catch(()=>{
+        if(b){b.disabled=false;b.style.opacity=1;b.textContent='🔍 立即扫描';}
+        if(tip)tip.textContent='扫描触发失败，请重试';
+      });
+    }
   }else{fetch('/api/'+t).then(r=>r.json()).then(()=>load());}
 }
+
+// ---- 选股池(v3.11.13) ----
+function renderStockPool(p){
+  const box=document.getElementById('stockpool');
+  if(!box) return;
+  if(!p){box.innerHTML='<div class="note">加载中…</div>';return;}
+  const rows=p.rows||[];
+  // 扫描进行中: 显示实时进度条, 不显示"无"
+  if(p.scanning){
+    const done=Math.max(0,Math.min(p.total_live||0, p.scanned_live||0));
+    const tot=p.total_live||0;
+    const pct = tot>0 ? Math.max(2, Math.round(done/tot*100)) : 0;
+    const lbl = tot>0 ? `已扫描 <b>${done}</b> / ${tot} 只（${pct}%）` : '正在准备全市场扫描…';
+    box.innerHTML =
+      '<div class="note">⏳ 全市场主板扫描中，完成后自动显示推荐结果…</div>'
+      +'<div style="margin-top:10px">'
+      +  '<div style="height:14px;background:var(--line);border-radius:7px;overflow:hidden">'
+      +    `<div style="height:100%;width:${pct}%;background:linear-gradient(90deg,var(--blue),#3aa0ff);border-radius:7px;transition:width .4s ease"></div>`
+      +  '</div>'
+      +  `<div style="margin-top:6px;font-size:12px;color:var(--mut)">${lbl}</div>`
+      +'</div>';
+    return;
+  }
+  // 今日尚未到 14:25, 还未扫描: 提示自动时间, 不显示"无"
+  if(!p.date){
+    box.innerHTML='<div class="note">尚未扫描：每个交易日 <b>14:25</b> 自动执行全市场扫描，到点刷新本页即可查看；或点「立即扫描」。</div>';
+    return;
+  }
+  let r=`<div class="note">${p.note||''}（${p.date} ${p.time||''}${p.seconds!=null?' · 耗时'+p.seconds+'s':''}）</div>`;
+  if(!rows.length){
+    // 已扫描但无命中: 才是真正的"无"
+    r+=`<div style="margin-top:8px"><b>今日推荐：无</b></div>`
+      +`<div class="note">今日全市场扫描未发现符合当前选股条件的标的。</div>`;
+    box.innerHTML=r;return;
+  }
+  r+='<table><tr><th>#</th><th>名称</th><th>代码</th><th>题材</th><th>现价</th><th>当日%</th>'
+    +'<th>指标</th><th>信号</th><th>分数</th></tr>';
+  rows.forEach((x,i)=>{
+    const sk=(x.s_k==null||x.s_k===undefined)
+      ?'--':('S1 '+x.s_k+' / S2 '+x.s_d+(x.s_x?' <b class="up">↑</b>':''));
+    r+=`<tr><td>${i+1}</td><td>${x.name}</td><td>${x.code}</td><td>${x.theme||'—'}</td>`
+      +`<td>${x.price==null?'--':fmt(x.price)}</td>`
+      +`<td class="${cls(x.pct)}">${x.pct==null?'--':sign(x.pct)+'%'}</td>`
+      +`<td>${x.m_s} / ${x.m_l}</td>`
+      +`<td>${sk}</td>`
+      +`<td><b>${x.score}</b></td></tr>`;
+  });
+  r+='</table>';
+  box.innerHTML=r;
+}
+function loadStockPool(){fetch('/api/stock_pool').then(r=>r.json()).then(renderStockPool).catch(()=>{});}
 // ---- 持仓前端编辑(仅 code/cost/shares, 保存走 /api/portfolio) ----
 let editing=false, pfEdit=[];
 function enterEdit(){
@@ -641,7 +753,7 @@ function pfSave(){
       else { if(msg) msg.textContent='❌ 保存失败：'+(d.error||'未知错误'); }
     }).catch(e=>{ if(msg) msg.textContent='❌ 保存失败：'+e; });
 }
-const EMBEDDED = {"alerts": [], "beijing": "2026-08-31 16:55:37", "close": {"market": {"breadth": 0.333, "breadth_down": 8, "breadth_up": 4, "confidence": 0.17, "cyb_pct": 0.42, "late": 0.002, "prob": 58.2, "retail": 0.86, "sector_avg": 0.13, "sh_pct": 0.86, "verdict": "偏多"}, "note": "v2.8多因子(大盘/板块/宽度/小盘/尾盘动向+个股阴阳/影线/量能/持仓位置), 置信度0.17, 非投资建议", "stocks": [{"code": "600522", "factors": [["大盘", 1.71, "上证+0.86% 创业板+0.42%"], ["板块(信息技术)", 2.36, "+1.97%"], ["当日阴阳", 1.5, "收阳"], ["影线", 0.88, "下影79% 上影21%"], ["量能", 0, "换手5.1%"], ["持仓位置", 0, "+2.98%"], ["宽度", -0.5, "上涨板块占比0.33"], ["小盘", 0.52, "国证2000+0.86%"], ["尾盘动向", 0.0, "上证尾盘+0.00%"]], "feats": {"breadth": 0.333, "cyb_pct": 0.42, "late": 0.002, "lower": 0.7946428571428594, "pct_pos": 1, "pnl_pct": 2.98, "retail_pct": 0.86, "sec_pct": 1.97, "sh_pct": 0.86, "turnover": 5.07, "upper": 0.20535714285714055}, "name": "中天科技", "prob": 78.5, "verdict": "偏多"}, {"code": "603220", "factors": [["大盘", 1.71, "上证+0.86% 创业板+0.42%"], ["板块()", 0.0, "+0.00%"], ["当日阴阳", 1.5, "收阳"], ["影线", 1.3, "下影93% 上影7%"], ["量能", 0, "换手3.1%"], ["持仓位置", 0, "+0.76%"], ["宽度", -0.5, "上涨板块占比0.33"], ["小盘", 0.52, "国证2000+0.86%"], ["尾盘动向", 0.0, "上证尾盘+0.00%"]], "feats": {"breadth": 0.333, "cyb_pct": 0.42, "late": 0.002, "lower": 0.9347826086956534, "pct_pos": 1, "pnl_pct": 0.76, "retail_pct": 0.86, "sec_pct": 0, "sh_pct": 0.86, "turnover": 3.14, "upper": 0.06521739130434656}, "name": "中贝通信", "prob": 71.2, "verdict": "偏多"}, {"code": "603538", "factors": [["大盘", 1.71, "上证+0.86% 创业板+0.42%"], ["板块()", 0.0, "+0.00%"], ["当日阴阳", -1.5, "收阴"], ["影线", -0.0, "下影50% 上影50%"], ["量能", 0.5, "换手11.9%"], ["持仓位置", 0, "-4.69%"], ["宽度", -0.5, "上涨板块占比0.33"], ["小盘", 0.52, "国证2000+0.86%"], ["尾盘动向", 0.0, "上证尾盘+0.00%"]], "feats": {"breadth": 0.333, "cyb_pct": 0.42, "late": 0.002, "lower": 0.4999999999999986, "pct_pos": -1, "pnl_pct": -4.69, "retail_pct": 0.86, "sec_pct": 0, "sh_pct": 0.86, "turnover": 11.94, "upper": 0.5000000000000013}, "name": "美诺华", "prob": 53.6, "verdict": "震荡"}, {"code": "600549", "factors": [["大盘", 1.71, "上证+0.86% 创业板+0.42%"], ["板块()", 0.0, "+0.00%"], ["当日阴阳", -1.5, "收阴"], ["影线", 1.29, "下影93% 上影7%"], ["量能", 0, "换手2.7%"], ["持仓位置", 0, "-2.18%"], ["宽度", -0.5, "上涨板块占比0.33"], ["小盘", 0.52, "国证2000+0.86%"], ["尾盘动向", 0.0, "上证尾盘+0.00%"]], "feats": {"breadth": 0.333, "cyb_pct": 0.42, "late": 0.002, "lower": 0.9304812834224623, "pct_pos": -1, "pnl_pct": -2.18, "retail_pct": 0.86, "sec_pct": 0, "sh_pct": 0.86, "turnover": 2.71, "upper": 0.06951871657753778}, "name": "厦门钨业", "prob": 57.5, "verdict": "震荡"}], "time": "16:55:37"}, "closed_positions": [{"buy_date": "2026-08-17", "close_date": "2026-08-19", "close_price": 14.8, "code": "002579", "cost": 15.426, "holding_days": 2, "market": "sz", "name": "中京电子", "note": "2026-08-19 09:43 卖出 800股@14.800(实际持仓 0，资金 T+1 到账)", "realized_pnl": -511.92, "shares": 800}, {"buy_date": "2026-08-19", "close_date": "2026-08-21", "close_price": null, "code": "600216", "cost": 0.0, "holding_days": 2, "market": "sh", "name": "浙江医药", "note": "清仓(卖出价待补全，成本此前为新购待入账)", "realized_pnl": null, "shares": 600}, {"buy_date": "2026-08-16", "close_date": "2026-08-21", "close_price": null, "code": "600176", "cost": 45.704, "holding_days": 5, "market": "sh", "name": "中国巨石", "note": "清仓(卖出价待补全)", "realized_pnl": null, "shares": 400}], "closed_today_pnl": 0, "closed_total_pnl": -511.92, "gapup": {"ai_used": false, "backend": "启发式", "context": {"breadth": 0.333, "late": 0.002, "retail": 0.86, "sector_avg": 0.13}, "note": "v2.8多因子(收盘位置/涨幅偏好/委比/量能/换手/尾盘拉升/宽度/小盘/大盘尾盘), 启发式精修(AI权重0.45), 非投资建议", "rows": [{"ai_prob": null, "code": "600664", "confidence": 0.3, "dist_limit_up": 8.55, "heuristic_prob": 28.9, "late_pull": 0.0, "model": "启发式", "name": "哈药股份", "pct": 1.33, "price": 9.12, "prob": 28.9, "volratio": 1, "weibi": 0.85}, {"ai_prob": null, "code": "000636", "confidence": 0.31, "dist_limit_up": 9.16, "heuristic_prob": 27.8, "late_pull": 0.0, "model": "启发式", "name": "风华高科", "pct": 0.78, "price": 55.88, "prob": 27.8, "volratio": 1, "weibi": 1.17}, {"ai_prob": null, "code": "002580", "confidence": 0.34, "dist_limit_up": 7.81, "heuristic_prob": 25.9, "late_pull": 0.0, "model": "启发式", "name": "圣阳股份", "pct": 2.04, "price": 21.51, "prob": 25.9, "volratio": 1, "weibi": 0.7}, {"ai_prob": null, "code": "002636", "confidence": 0.34, "dist_limit_up": 6.27, "heuristic_prob": 25.9, "late_pull": 0.0, "model": "启发式", "name": "金安国纪", "pct": 3.51, "price": 75.75, "prob": 25.9, "volratio": 1, "weibi": 1.56}, {"ai_prob": null, "code": "001288", "confidence": 0.34, "dist_limit_up": 6.42, "heuristic_prob": 25.5, "late_pull": 0.0, "model": "启发式", "name": "运机集团", "pct": 3.37, "price": 29.42, "prob": 25.5, "volratio": 1, "weibi": 2.83}], "time": "16:55:38"}, "holdings": [{"add1_price": 32.45, "add2_price": 30.75, "amplitude": 3.2, "anomalies": [], "at_pressure": false, "at_take": false, "below_stop": false, "buy_date": "2026-08-15", "code": "600522", "cost": 34.162, "day_basis": "昨收", "day_pnl": 588.0, "day_pnl_pct": 0.4, "dist_limit_up": 9.55, "float_mv": 1200.7, "high": 35.41, "in_add": false, "limit_down": 31.54, "limit_up": 38.54, "low": 34.29, "market": "sh", "name": "中天科技", "open": 34.29, "pct": 0.4, "pnl": 4275.6, "pnl_pct": 2.98, "pressure": 40.99, "prevclose": 35.04, "price": 35.18, "sector_code": "sz399935", "sector_name": "信息技术", "shares": 4200.0, "stop_price": 31.43, "take_price": 38.26, "theme": "", "theme_name": "光纤光缆", "theme_pct": -0.25, "theme_rank": 20, "theme_total": 36, "turnover": 5.07, "value": 147756.0, "volratio": null}, {"add1_price": 17.81, "add2_price": 16.87, "amplitude": 4.96, "anomalies": [], "at_pressure": false, "at_take": false, "below_stop": false, "buy_date": "2026-08-15", "code": "603220", "cost": 18.748, "day_basis": "混合", "day_pnl": 1043.0, "day_pnl_pct": 1.76, "dist_limit_up": 7.89, "float_mv": 101.3, "high": 18.95, "in_add": false, "limit_down": 16.68, "limit_up": 20.38, "low": 18.03, "market": "sh", "name": "中贝通信", "open": 18.1, "pct": 1.94, "pnl": 454.4, "pnl_pct": 0.76, "pressure": 22.5, "prevclose": 18.53, "price": 18.89, "sector_code": "", "sector_name": "", "shares": 3200.0, "stop_price": 17.25, "take_price": 21.0, "theme": "", "theme_name": "AI算力", "theme_pct": 3.43, "theme_rank": 2, "theme_total": 36, "turnover": 3.14, "value": 60448.0, "volratio": null}, {"add1_price": 26.37, "add2_price": 24.98, "amplitude": 4.76, "anomalies": [], "at_pressure": false, "at_take": false, "below_stop": false, "buy_date": "2026-08-27", "code": "603538", "cost": 27.753, "day_basis": "昨收", "day_pnl": -340.0, "day_pnl_pct": -3.11, "dist_limit_up": 13.53, "float_mv": 89.1, "high": 27.1, "in_add": false, "limit_down": 24.57, "limit_up": 30.03, "low": 25.8, "market": "sh", "name": "美诺华", "open": 26.7, "pct": -3.11, "pnl": -521.2, "pnl_pct": -4.69, "pressure": 33.3, "prevclose": 27.3, "price": 26.45, "sector_code": "", "sector_name": "", "shares": 400.0, "stop_price": 25.53, "take_price": 31.08, "theme": "", "theme_name": "原料药/CDMO", "theme_pct": -2.21, "theme_rank": 33, "theme_total": 36, "turnover": 11.94, "value": 10580.0, "volratio": null}, {"add1_price": 52.36, "add2_price": 49.61, "amplitude": 3.43, "anomalies": [], "at_pressure": false, "at_take": false, "below_stop": false, "buy_date": "2026-08-28", "code": "600549", "cost": 55.121, "day_basis": "昨收", "day_pnl": -67.0, "day_pnl_pct": -1.23, "dist_limit_up": 11.37, "float_mv": 837.9, "high": 54.05, "in_add": false, "limit_down": 49.13, "limit_up": 60.05, "low": 52.18, "market": "sh", "name": "厦门钨业", "open": 52.82, "pct": -1.23, "pnl": -120.1, "pnl_pct": -2.18, "pressure": 66.15, "prevclose": 54.59, "price": 53.92, "sector_code": "", "sector_name": "", "shares": 100.0, "stop_price": 50.71, "take_price": 61.74, "theme": "有色", "theme_name": "有色", "theme_pct": -1.24, "theme_rank": 30, "theme_total": 36, "turnover": 2.71, "value": 5392.0, "volratio": null}], "idx_forecast": {"ai_used": false, "breadth": 0.333, "breadth_down": 8, "breadth_up": 4, "chart": [{"p": 3926.53, "t": "0930"}, {"p": 3927.01, "t": "0931"}, {"p": 3933.56, "t": "0932"}, {"p": 3931.39, "t": "0933"}, {"p": 3933.97, "t": "0934"}, {"p": 3934.91, "t": "0935"}, {"p": 3939.14, "t": "0936"}, {"p": 3941.43, "t": "0937"}, {"p": 3939.09, "t": "0938"}, {"p": 3939.52, "t": "0939"}, {"p": 3944.91, "t": "0940"}, {"p": 3942.46, "t": "0941"}, {"p": 3942.43, "t": "0942"}, {"p": 3942.97, "t": "0943"}, {"p": 3944.48, "t": "0944"}, {"p": 3941.54, "t": "0945"}, {"p": 3940.66, "t": "0946"}, {"p": 3940.03, "t": "0947"}, {"p": 3940.07, "t": "0948"}, {"p": 3934.59, "t": "0949"}, {"p": 3933.74, "t": "0950"}, {"p": 3933.24, "t": "0951"}, {"p": 3929.4, "t": "0952"}, {"p": 3929.81, "t": "0953"}, {"p": 3933.72, "t": "0954"}, {"p": 3937.17, "t": "0955"}, {"p": 3936.05, "t": "0956"}, {"p": 3936.27, "t": "0957"}, {"p": 3939.75, "t": "0958"}, {"p": 3938.74, "t": "0959"}, {"p": 3938.04, "t": "1000"}, {"p": 3934.52, "t": "1001"}, {"p": 3934.96, "t": "1002"}, {"p": 3935.82, "t": "1003"}, {"p": 3938.11, "t": "1004"}, {"p": 3940.7, "t": "1005"}, {"p": 3941.38, "t": "1006"}, {"p": 3943.49, "t": "1007"}, {"p": 3944.57, "t": "1008"}, {"p": 3943.93, "t": "1009"}, {"p": 3942.62, "t": "1010"}, {"p": 3943.52, "t": "1011"}, {"p": 3943.22, "t": "1012"}, {"p": 3943.02, "t": "1013"}, {"p": 3945.41, "t": "1014"}, {"p": 3947.15, "t": "1015"}, {"p": 3946.92, "t": "1016"}, {"p": 3946.91, "t": "1017"}, {"p": 3948.31, "t": "1018"}, {"p": 3946.29, "t": "1019"}, {"p": 3944.95, "t": "1020"}, {"p": 3943.12, "t": "1021"}, {"p": 3944.34, "t": "1022"}, {"p": 3942.96, "t": "1023"}, {"p": 3942.89, "t": "1024"}, {"p": 3943.98, "t": "1025"}, {"p": 3944.03, "t": "1026"}, {"p": 3944.76, "t": "1027"}, {"p": 3944.9, "t": "1028"}, {"p": 3947.23, "t": "1029"}, {"p": 3945.25, "t": "1030"}, {"p": 3944.46, "t": "1031"}, {"p": 3941.34, "t": "1032"}, {"p": 3940.89, "t": "1033"}, {"p": 3940.25, "t": "1034"}, {"p": 3939.21, "t": "1035"}, {"p": 3937.44, "t": "1036"}, {"p": 3938.69, "t": "1037"}, {"p": 3939.49, "t": "1038"}, {"p": 3941.46, "t": "1039"}, {"p": 3941.19, "t": "1040"}, {"p": 3939.03, "t": "1041"}, {"p": 3938.99, "t": "1042"}, {"p": 3937.95, "t": "1043"}, {"p": 3937.48, "t": "1044"}, {"p": 3937.66, "t": "1045"}, {"p": 3938.2, "t": "1046"}, {"p": 3941.11, "t": "1047"}, {"p": 3941.0, "t": "1048"}, {"p": 3939.26, "t": "1049"}, {"p": 3937.23, "t": "1050"}, {"p": 3938.07, "t": "1051"}, {"p": 3935.87, "t": "1052"}, {"p": 3935.99, "t": "1053"}, {"p": 3933.8, "t": "1054"}, {"p": 3934.4, "t": "1055"}, {"p": 3934.59, "t": "1056"}, {"p": 3935.52, "t": "1057"}, {"p": 3935.02, "t": "1058"}, {"p": 3936.58, "t": "1059"}, {"p": 3936.99, "t": "1100"}, {"p": 3935.86, "t": "1101"}, {"p": 3935.77, "t": "1102"}, {"p": 3935.14, "t": "1103"}, {"p": 3937.52, "t": "1104"}, {"p": 3936.86, "t": "1105"}, {"p": 3937.4, "t": "1106"}, {"p": 3936.7, "t": "1107"}, {"p": 3937.2, "t": "1108"}, {"p": 3938.88, "t": "1109"}, {"p": 3941.17, "t": "1110"}, {"p": 3940.58, "t": "1111"}, {"p": 3940.09, "t": "1112"}, {"p": 3941.5, "t": "1113"}, {"p": 3939.73, "t": "1114"}, {"p": 3941.66, "t": "1115"}, {"p": 3943.89, "t": "1116"}, {"p": 3943.12, "t": "1117"}, {"p": 3942.94, "t": "1118"}, {"p": 3943.46, "t": "1119"}, {"p": 3943.61, "t": "1120"}, {"p": 3944.04, "t": "1121"}, {"p": 3945.96, "t": "1122"}, {"p": 3944.75, "t": "1123"}, {"p": 3945.35, "t": "1124"}, {"p": 3943.83, "t": "1125"}, {"p": 3944.34, "t": "1126"}, {"p": 3944.18, "t": "1127"}, {"p": 3945.59, "t": "1128"}, {"p": 3943.94, "t": "1129"}, {"p": 3944.46, "t": "1130"}, {"p": 3944.46, "t": "1300"}, {"p": 3949.53, "t": "1301"}, {"p": 3951.32, "t": "1302"}, {"p": 3948.46, "t": "1303"}, {"p": 3947.56, "t": "1304"}, {"p": 3947.88, "t": "1305"}, {"p": 3948.65, "t": "1306"}, {"p": 3947.91, "t": "1307"}, {"p": 3946.14, "t": "1308"}, {"p": 3945.69, "t": "1309"}, {"p": 3946.21, "t": "1310"}, {"p": 3945.41, "t": "1311"}, {"p": 3947.2, "t": "1312"}, {"p": 3948.36, "t": "1313"}, {"p": 3950.17, "t": "1314"}, {"p": 3951.04, "t": "1315"}, {"p": 3952.55, "t": "1316"}, {"p": 3953.17, "t": "1317"}, {"p": 3955.6, "t": "1318"}, {"p": 3954.13, "t": "1319"}, {"p": 3955.01, "t": "1320"}, {"p": 3956.79, "t": "1321"}, {"p": 3955.83, "t": "1322"}, {"p": 3957.48, "t": "1323"}, {"p": 3956.63, "t": "1324"}, {"p": 3959.36, "t": "1325"}, {"p": 3959.25, "t": "1326"}, {"p": 3960.35, "t": "1327"}, {"p": 3961.97, "t": "1328"}, {"p": 3962.37, "t": "1329"}, {"p": 3963.53, "t": "1330"}, {"p": 3965.46, "t": "1331"}, {"p": 3966.34, "t": "1332"}, {"p": 3961.28, "t": "1333"}, {"p": 3962.09, "t": "1334"}, {"p": 3962.16, "t": "1335"}, {"p": 3961.9, "t": "1336"}, {"p": 3961.96, "t": "1337"}, {"p": 3962.86, "t": "1338"}, {"p": 3961.44, "t": "1339"}, {"p": 3961.18, "t": "1340"}, {"p": 3961.13, "t": "1341"}, {"p": 3961.71, "t": "1342"}, {"p": 3964.29, "t": "1343"}, {"p": 3964.89, "t": "1344"}, {"p": 3965.49, "t": "1345"}, {"p": 3963.58, "t": "1346"}, {"p": 3963.68, "t": "1347"}, {"p": 3963.48, "t": "1348"}, {"p": 3964.11, "t": "1349"}, {"p": 3964.1, "t": "1350"}, {"p": 3963.66, "t": "1351"}, {"p": 3963.91, "t": "1352"}, {"p": 3963.04, "t": "1353"}, {"p": 3962.23, "t": "1354"}, {"p": 3964.12, "t": "1355"}, {"p": 3964.11, "t": "1356"}, {"p": 3964.39, "t": "1357"}, {"p": 3965.74, "t": "1358"}, {"p": 3967.94, "t": "1359"}, {"p": 3969.22, "t": "1400"}, {"p": 3969.35, "t": "1401"}, {"p": 3968.83, "t": "1402"}, {"p": 3967.36, "t": "1403"}, {"p": 3965.9, "t": "1404"}, {"p": 3967.22, "t": "1405"}, {"p": 3967.02, "t": "1406"}, {"p": 3967.82, "t": "1407"}, {"p": 3969.53, "t": "1408"}, {"p": 3969.14, "t": "1409"}, {"p": 3968.71, "t": "1410"}, {"p": 3968.89, "t": "1411"}, {"p": 3971.93, "t": "1412"}, {"p": 3972.16, "t": "1413"}, {"p": 3973.49, "t": "1414"}, {"p": 3973.21, "t": "1415"}, {"p": 3971.82, "t": "1416"}, {"p": 3974.42, "t": "1417"}, {"p": 3976.38, "t": "1418"}, {"p": 3975.15, "t": "1419"}, {"p": 3976.39, "t": "1420"}, {"p": 3976.78, "t": "1421"}, {"p": 3978.59, "t": "1422"}, {"p": 3980.03, "t": "1423"}, {"p": 3978.89, "t": "1424"}, {"p": 3979.25, "t": "1425"}, {"p": 3980.55, "t": "1426"}, {"p": 3981.13, "t": "1427"}, {"p": 3979.76, "t": "1428"}, {"p": 3979.14, "t": "1429"}, {"p": 3977.62, "t": "1430"}, {"p": 3977.15, "t": "1431"}, {"p": 3979.43, "t": "1432"}, {"p": 3980.4, "t": "1433"}, {"p": 3981.71, "t": "1434"}, {"p": 3983.23, "t": "1435"}, {"p": 3982.86, "t": "1436"}, {"p": 3982.83, "t": "1437"}, {"p": 3981.55, "t": "1438"}, {"p": 3980.94, "t": "1439"}, {"p": 3982.88, "t": "1440"}, {"p": 3983.12, "t": "1441"}, {"p": 3982.61, "t": "1442"}, {"p": 3981.56, "t": "1443"}, {"p": 3981.24, "t": "1444"}, {"p": 3981.45, "t": "1445"}, {"p": 3982.25, "t": "1446"}, {"p": 3982.82, "t": "1447"}, {"p": 3981.96, "t": "1448"}, {"p": 3981.37, "t": "1449"}, {"p": 3981.48, "t": "1450"}, {"p": 3981.44, "t": "1451"}, {"p": 3981.54, "t": "1452"}, {"p": 3981.18, "t": "1453"}, {"p": 3981.29, "t": "1454"}, {"p": 3981.12, "t": "1455"}, {"p": 3981.53, "t": "1456"}, {"p": 3981.74, "t": "1457"}, {"p": 3982.23, "t": "1458"}, {"p": 3982.23, "t": "1459"}, {"p": 3986.3, "t": "1500"}], "confidence": 0.21, "high": 3986.3, "late": 0.002, "low": 3926.5, "note": "v2.8多因子(动量+尾盘动向+日内位置+量能+宽度+小盘情绪), 预测1小时后方向, 置信度0.21", "pct": 0.86, "pos": 1.0, "price": 3986.3, "prob": 22.4, "retail": 0.86, "time": "16:55:37", "verdict": "看涨", "vr": 1, "weibi": 1.2}, "indices": [{"code": "sh000001", "high": 3986.3, "low": 3926.5, "name": "上证指数", "pct": 0.86, "price": 3986.3}, {"code": "sz399001", "high": 14015.0, "low": 13740.74, "name": "深证成指", "pct": 0.44, "price": 14015.0}, {"code": "sz399006", "high": 3438.68, "low": 3359.14, "name": "创业板指", "pct": 0.42, "price": 3438.68}, {"code": "sh000300", "high": 4625.09, "low": 4557.35, "name": "沪深300", "pct": 0.35, "price": 4625.09}, {"code": "sh000905", "high": 7953.93, "low": 7764.98, "name": "中证500", "pct": 0.72, "price": 7952.1}, {"code": "sh000852", "high": 7771.55, "low": 7604.95, "name": "中证1000", "pct": 0.85, "price": 7770.42}, {"code": "sz399303", "high": 10125.19, "low": 9907.41, "name": "国证2000", "pct": 0.86, "price": 10123.08}], "is_weekday": true, "phase": "非交易时段", "preopen": null, "retail_pnl": {"name": "国证2000", "pct": 0.86, "price": 10123.08}, "sector_avg": 0.13, "sector_bias": "板块分化/震荡", "sector_down_count": 8, "sector_drivers": {"index_name": "上证指数", "index_pct": 0.86, "move": "明显上行", "note": "以上证指数涨跌幅为基准, 细分题材(成分股平均涨跌)相对大盘偏离≥0.8%视为明显异动; 拉=正向拉动指数, 踩=负向压制指数", "pressers": [{"code": "TH:光伏", "dev": -4.49, "name": "光伏", "pct": -3.63}, {"code": "TH:房地产", "dev": -3.89, "name": "房地产", "pct": -3.03}, {"code": "TH:锂电池", "dev": -3.46, "name": "锂电池", "pct": -2.6}], "pullers": [{"code": "TH:传媒", "dev": 6.33, "name": "传媒", "pct": 7.19}, {"code": "TH:AI算力", "dev": 2.57, "name": "AI算力", "pct": 3.43}, {"code": "TH:智慧交通", "dev": 1.98, "name": "智慧交通", "pct": 2.84}], "threshold": 0.8, "time": "16:55:37"}, "sector_up_count": 4, "sectors": [{"code": "sz399935", "name": "信息技术", "pct": 1.97}, {"code": "sz399928", "name": "能源", "pct": 1.59}, {"code": "sz399934", "name": "金融地产", "pct": 0.85}, {"code": "sz399975", "name": "证券公司", "pct": 0.16}, {"code": "sz399929", "name": "原材料", "pct": 0.0}, {"code": "sz399930", "name": "工业", "pct": 0.0}, {"code": "sz399931", "name": "可选消费", "pct": 0.0}, {"code": "sz399936", "name": "电信业务", "pct": 0.0}, {"code": "sz399937", "name": "公用事业", "pct": 0.0}, {"code": "sz399932", "name": "主要消费", "pct": -0.72}, {"code": "sz399997", "name": "中证白酒", "pct": -1.07}, {"code": "sz399933", "name": "医药卫生", "pct": -1.25}], "server_time": "2026-08-31 16:55:41", "themes": [{"code": "TH:传媒", "n": 4, "name": "传媒", "pct": 7.19}, {"code": "TH:AI算力", "n": 7, "name": "AI算力", "pct": 3.43}, {"code": "TH:智慧交通", "n": 5, "name": "智慧交通", "pct": 2.84}, {"code": "TH:PCB", "n": 8, "name": "PCB", "pct": 2.5}, {"code": "TH:半导体", "n": 8, "name": "半导体", "pct": 2.18}, {"code": "TH:煤炭", "n": 4, "name": "煤炭", "pct": 1.84}, {"code": "TH:银行", "n": 5, "name": "银行", "pct": 1.8}, {"code": "TH:消费电子", "n": 7, "name": "消费电子", "pct": 1.77}, {"code": "TH:环保", "n": 6, "name": "环保", "pct": 1.7}, {"code": "TH:通信", "n": 5, "name": "通信", "pct": 1.28}, {"code": "TH:CPO光模块", "n": 9, "name": "CPO光模块", "pct": 1.1}, {"code": "TH:工程机械", "n": 3, "name": "工程机械", "pct": 0.78}, {"code": "TH:软件", "n": 6, "name": "软件", "pct": 0.77}, {"code": "TH:机器人", "n": 5, "name": "机器人", "pct": 0.59}, {"code": "TH:证券", "n": 5, "name": "证券", "pct": 0.29}, {"code": "TH:军工", "n": 6, "name": "军工", "pct": 0.1}, {"code": "TH:航运港口", "n": 4, "name": "航运港口", "pct": 0.02}, {"code": "TH:化工", "n": 5, "name": "化工", "pct": -0.11}, {"code": "TH:电力", "n": 5, "name": "电力", "pct": -0.15}, {"code": "TH:光纤光缆", "n": 5, "name": "光纤光缆", "pct": -0.25}, {"code": "TH:创新药", "n": 6, "name": "创新药", "pct": -0.35}, {"code": "TH:家电", "n": 5, "name": "家电", "pct": -0.41}, {"code": "TH:农业", "n": 4, "name": "农业", "pct": -0.63}, {"code": "TH:新能源车", "n": 5, "name": "新能源车", "pct": -0.81}, {"code": "TH:数字货币", "n": 8, "name": "数字货币", "pct": -0.94}, {"code": "TH:氢能源", "n": 6, "name": "氢能源", "pct": -0.94}, {"code": "TH:钢铁", "n": 3, "name": "钢铁", "pct": -1.15}, {"code": "TH:白酒", "n": 8, "name": "白酒", "pct": -1.16}, {"code": "TH:造纸", "n": 6, "name": "造纸", "pct": -1.21}, {"code": "TH:有色", "n": 5, "name": "有色", "pct": -1.24}, {"code": "TH:食品饮料", "n": 5, "name": "食品饮料", "pct": -1.29}, {"code": "TH:中药", "n": 8, "name": "中药", "pct": -1.87}, {"code": "TH:原料药/CDMO", "n": 5, "name": "原料药/CDMO", "pct": -2.21}, {"code": "TH:锂电池", "n": 6, "name": "锂电池", "pct": -2.6}, {"code": "TH:房地产", "n": 4, "name": "房地产", "pct": -3.03}, {"code": "TH:光伏", "n": 7, "name": "光伏", "pct": -3.63}], "total_day_pnl": 1224.0, "total_day_pnl_pct": 0.55, "total_pnl": 4088.7, "total_pnl_pct": 1.86, "total_value": 224176.0, "trading": false, "weekday": 0};
+const EMBEDDED = {"beijing": "2026-09-07 16:13:32", "weekday": 0, "trading": false, "phase": "非交易时段", "is_weekday": true, "indices": [{"name": "上证指数", "code": "sh000001", "price": 3932.7, "pct": 0.07, "high": 3948.42, "low": 3916.49}, {"name": "深证成指", "code": "sz399001", "price": 13774.91, "pct": 1.91, "high": 13811.26, "low": 13590.82}, {"name": "创业板指", "code": "sz399006", "price": 3398.68, "pct": 3.41, "high": 3409.36, "low": 3320.27}, {"name": "沪深300", "code": "sh000300", "price": 4575.02, "pct": 0.59, "high": 4580.7, "low": 4545.41}, {"name": "中证500", "code": "sh000905", "price": 7759.37, "pct": 1.39, "high": 7791.79, "low": 7672.99}, {"name": "中证1000", "code": "sh000852", "price": 7639.36, "pct": 1.75, "high": 7669.84, "low": 7541.14}, {"name": "国证2000", "code": "sz399303", "price": 10017.02, "pct": 1.67, "high": 10049.84, "low": 9877.68}], "sectors": [{"name": "信息技术", "code": "sz399935", "pct": 3.34}, {"name": "原材料", "code": "sz399929", "pct": 0.0}, {"name": "工业", "code": "sz399930", "pct": 0.0}, {"name": "可选消费", "code": "sz399931", "pct": 0.0}, {"name": "电信业务", "code": "sz399936", "pct": 0.0}, {"name": "公用事业", "code": "sz399937", "pct": 0.0}, {"name": "主要消费", "code": "sz399932", "pct": -0.27}, {"name": "中证白酒", "code": "sz399997", "pct": -0.3}, {"name": "医药卫生", "code": "sz399933", "pct": -0.43}, {"name": "证券公司", "code": "sz399975", "pct": -1.38}, {"name": "金融地产", "code": "sz399934", "pct": -1.65}, {"name": "能源", "code": "sz399928", "pct": -1.87}], "themes": [{"name": "CPO光模块", "code": "TH:CPO光模块", "pct": 8.6, "n": 9}, {"name": "PCB", "code": "TH:PCB", "pct": 7.81, "n": 8}, {"name": "光纤光缆", "code": "TH:光纤光缆", "pct": 4.05, "n": 5}, {"name": "消费电子", "code": "TH:消费电子", "pct": 2.33, "n": 7}, {"name": "传媒", "code": "TH:传媒", "pct": 2.21, "n": 4}, {"name": "半导体", "code": "TH:半导体", "pct": 1.94, "n": 8}, {"name": "环保", "code": "TH:环保", "pct": 1.83, "n": 6}, {"name": "AI算力", "code": "TH:AI算力", "pct": 0.98, "n": 7}, {"name": "机器人", "code": "TH:机器人", "pct": 0.95, "n": 5}, {"name": "造纸", "code": "TH:造纸", "pct": 0.92, "n": 6}, {"name": "氢能源", "code": "TH:氢能源", "pct": 0.89, "n": 6}, {"name": "光伏", "code": "TH:光伏", "pct": 0.81, "n": 7}, {"name": "超级电容", "code": "TH:超级电容", "pct": 0.53, "n": 1}, {"name": "食品饮料", "code": "TH:食品饮料", "pct": 0.33, "n": 5}, {"name": "农业", "code": "TH:农业", "pct": 0.04, "n": 4}, {"name": "创新药", "code": "TH:创新药", "pct": 0.01, "n": 6}, {"name": "新能源车", "code": "TH:新能源车", "pct": -0.08, "n": 5}, {"name": "通信", "code": "TH:通信", "pct": -0.15, "n": 5}, {"name": "工程机械", "code": "TH:工程机械", "pct": -0.18, "n": 3}, {"name": "白酒", "code": "TH:白酒", "pct": -0.2, "n": 8}, {"name": "锂电池", "code": "TH:锂电池", "pct": -0.23, "n": 6}, {"name": "中药", "code": "TH:中药", "pct": -0.32, "n": 8}, {"name": "智慧交通", "code": "TH:智慧交通", "pct": -0.34, "n": 5}, {"name": "基建/工程咨询", "code": "TH:基建/工程咨询", "pct": -0.48, "n": 4}, {"name": "有色", "code": "TH:有色", "pct": -0.55, "n": 5}, {"name": "家电", "code": "TH:家电", "pct": -0.64, "n": 5}, {"name": "原料药/CDMO", "code": "TH:原料药/CDMO", "pct": -0.66, "n": 5}, {"name": "软件", "code": "TH:软件", "pct": -0.98, "n": 6}, {"name": "房地产", "code": "TH:房地产", "pct": -1.23, "n": 4}, {"name": "军工", "code": "TH:军工", "pct": -1.32, "n": 6}, {"name": "电力", "code": "TH:电力", "pct": -1.39, "n": 5}, {"name": "航运港口", "code": "TH:航运港口", "pct": -1.42, "n": 4}, {"name": "钢铁", "code": "TH:钢铁", "pct": -1.49, "n": 3}, {"name": "证券", "code": "TH:证券", "pct": -1.52, "n": 5}, {"name": "银行", "code": "TH:银行", "pct": -1.57, "n": 5}, {"name": "数字货币", "code": "TH:数字货币", "pct": -1.94, "n": 8}, {"name": "化工", "code": "TH:化工", "pct": -2.46, "n": 5}, {"name": "煤炭", "code": "TH:煤炭", "pct": -2.71, "n": 4}], "sector_up_count": 1, "sector_down_count": 11, "sector_avg": -0.21, "sector_bias": "板块分化", "retail_pnl": {"name": "国证2000", "price": 10017.02, "pct": 1.67}, "holdings": [{"name": "中天科技", "code": "600522", "market": "sh", "price": 32.72, "prevclose": 31.7, "open": 32.1, "pct": 3.22, "high": 32.85, "low": 31.97, "cost": 34.39, "shares": 4200.0, "value": 137424.0, "pnl": -7014.0, "pnl_pct": -4.86, "day_pnl": 4284.0, "day_pnl_pct": 3.22, "day_basis": "昨收", "limit_up": 34.87, "limit_down": 28.53, "turnover": 3.7, "amplitude": 2.78, "volratio": null, "float_mv": 1116.7, "stop_price": 31.64, "add1_price": 32.67, "add2_price": 30.95, "take_price": 38.52, "pressure": 41.27, "dist_limit_up": 6.57, "below_stop": false, "in_add": false, "at_take": false, "at_pressure": false, "anomalies": [], "sector_code": "sz399935", "sector_name": "信息技术", "theme": "", "buy_date": "2026-08-15", "theme_name": "光纤光缆", "theme_pct": 4.05, "theme_rank": 3, "theme_total": 38, "sector_pct": 3.34}, {"name": "黄河旋风", "code": "600172", "market": "sh", "price": 15.89, "prevclose": 15.79, "open": 15.49, "pct": 0.63, "high": 16.2, "low": 14.86, "cost": 15.283, "shares": 400.0, "value": 6356.0, "pnl": 242.8, "pnl_pct": 3.97, "day_pnl": 40.0, "day_pnl_pct": 0.63, "day_basis": "昨收", "limit_up": 17.37, "limit_down": 14.21, "turnover": 18.93, "amplitude": 8.49, "volratio": null, "float_mv": 204.1, "stop_price": 14.06, "add1_price": 14.52, "add2_price": 13.75, "take_price": 17.12, "pressure": 18.34, "dist_limit_up": 9.31, "below_stop": false, "in_add": false, "at_take": false, "at_pressure": false, "anomalies": [{"level": "warn", "text": "剧烈震荡 振幅8.49%"}, {"level": "warn", "text": "高换手 18.93%"}], "sector_code": "", "sector_name": "", "theme": "有色", "buy_date": "2026-09-02", "theme_name": "有色", "theme_pct": -0.55, "theme_rank": 25, "theme_total": 38, "sector_pct": null}, {"name": "金富科技", "code": "003018", "market": "sz", "price": 55.01, "prevclose": 55.5, "open": 55.52, "pct": -0.88, "high": 56.05, "low": 53.02, "cost": 53.529, "shares": 1100.0, "value": 60511.0, "pnl": 1629.1, "pnl_pct": 2.77, "day_pnl": -539.0, "day_pnl_pct": -0.88, "day_basis": "昨收", "limit_up": 61.05, "limit_down": 49.95, "turnover": 8.09, "amplitude": 5.46, "volratio": null, "float_mv": 156.5, "stop_price": 49.25, "add1_price": 50.85, "add2_price": 48.18, "take_price": 59.95, "pressure": 64.23, "dist_limit_up": 10.98, "below_stop": false, "in_add": false, "at_take": false, "at_pressure": false, "anomalies": [], "sector_code": "", "sector_name": "", "theme": "", "buy_date": "2026-09-03", "sector_pct": null}, {"name": "共达电声", "code": "002655", "market": "sz", "price": 38.85, "prevclose": 37.71, "open": 38.42, "pct": 3.02, "high": 39.22, "low": 36.6, "cost": 38.73, "shares": 400.0, "value": 15540.0, "pnl": 48.0, "pnl_pct": 0.31, "day_pnl": 456.0, "day_pnl_pct": 3.02, "day_basis": "昨收", "limit_up": 41.48, "limit_down": 33.94, "turnover": 8.38, "amplitude": 6.95, "volratio": null, "float_mv": 141.1, "stop_price": 35.63, "add1_price": 36.79, "add2_price": 34.86, "take_price": 43.38, "pressure": 46.48, "dist_limit_up": 6.77, "below_stop": false, "in_add": false, "at_take": false, "at_pressure": false, "anomalies": [], "sector_code": "", "sector_name": "", "theme": "", "buy_date": "2026-09-03", "sector_pct": null}], "total_value": 219831.0, "total_pnl": -5094.1, "total_pnl_pct": -2.26, "total_day_pnl": 4241.0, "total_day_pnl_pct": 1.97, "idx_forecast": {"time": "16:13:42", "price": 3932.7, "pct": 0.07, "high": 3948.42, "low": 3916.49, "prob": 51.0, "verdict": "震荡", "weibi": 0.9, "vr": 1, "pos": 0.508, "late": -0.02, "breadth": 0.083, "breadth_up": 1, "breadth_down": 11, "retail": 1.67, "ai_used": false, "confidence": 0.0, "chart": [{"t": "0930", "p": 3942.51}, {"t": "0931", "p": 3944.83}, {"t": "0932", "p": 3944.29}, {"t": "0933", "p": 3944.2}, {"t": "0934", "p": 3948.04}, {"t": "0935", "p": 3946.01}, {"t": "0936", "p": 3940.47}, {"t": "0937", "p": 3939.5}, {"t": "0938", "p": 3937.03}, {"t": "0939", "p": 3939.07}, {"t": "0940", "p": 3941.96}, {"t": "0941", "p": 3941.19}, {"t": "0942", "p": 3934.89}, {"t": "0943", "p": 3933.71}, {"t": "0944", "p": 3931.22}, {"t": "0945", "p": 3931.3}, {"t": "0946", "p": 3935.31}, {"t": "0947", "p": 3937.48}, {"t": "0948", "p": 3935.31}, {"t": "0949", "p": 3939.54}, {"t": "0950", "p": 3937.43}, {"t": "0951", "p": 3936.15}, {"t": "0952", "p": 3936.31}, {"t": "0953", "p": 3940.82}, {"t": "0954", "p": 3941.17}, {"t": "0955", "p": 3939.82}, {"t": "0956", "p": 3937.75}, {"t": "0957", "p": 3936.61}, {"t": "0958", "p": 3936.44}, {"t": "0959", "p": 3933.25}, {"t": "1000", "p": 3930.45}, {"t": "1001", "p": 3929.98}, {"t": "1002", "p": 3924.98}, {"t": "1003", "p": 3923.02}, {"t": "1004", "p": 3925.09}, {"t": "1005", "p": 3924.52}, {"t": "1006", "p": 3926.46}, {"t": "1007", "p": 3925.64}, {"t": "1008", "p": 3929.38}, {"t": "1009", "p": 3931.64}, {"t": "1010", "p": 3930.13}, {"t": "1011", "p": 3927.94}, {"t": "1012", "p": 3930.74}, {"t": "1013", "p": 3929.71}, {"t": "1014", "p": 3927.71}, {"t": "1015", "p": 3929.48}, {"t": "1016", "p": 3933.51}, {"t": "1017", "p": 3931.72}, {"t": "1018", "p": 3930.02}, {"t": "1019", "p": 3929.54}, {"t": "1020", "p": 3929.92}, {"t": "1021", "p": 3928.17}, {"t": "1022", "p": 3927.27}, {"t": "1023", "p": 3927.75}, {"t": "1024", "p": 3928.04}, {"t": "1025", "p": 3926.4}, {"t": "1026", "p": 3928.54}, {"t": "1027", "p": 3928.17}, {"t": "1028", "p": 3927.46}, {"t": "1029", "p": 3926.25}, {"t": "1030", "p": 3926.92}, {"t": "1031", "p": 3927.63}, {"t": "1032", "p": 3929.29}, {"t": "1033", "p": 3928.53}, {"t": "1034", "p": 3929.04}, {"t": "1035", "p": 3929.43}, {"t": "1036", "p": 3930.2}, {"t": "1037", "p": 3930.86}, {"t": "1038", "p": 3931.04}, {"t": "1039", "p": 3931.69}, {"t": "1040", "p": 3930.89}, {"t": "1041", "p": 3929.2}, {"t": "1042", "p": 3929.28}, {"t": "1043", "p": 3929.04}, {"t": "1044", "p": 3929.56}, {"t": "1045", "p": 3928.3}, {"t": "1046", "p": 3928.03}, {"t": "1047", "p": 3926.97}, {"t": "1048", "p": 3927.13}, {"t": "1049", "p": 3924.98}, {"t": "1050", "p": 3925.89}, {"t": "1051", "p": 3925.26}, {"t": "1052", "p": 3925.88}, {"t": "1053", "p": 3927.28}, {"t": "1054", "p": 3926.33}, {"t": "1055", "p": 3925.59}, {"t": "1056", "p": 3925.37}, {"t": "1057", "p": 3924.56}, {"t": "1058", "p": 3922.1}, {"t": "1059", "p": 3920.27}, {"t": "1100", "p": 3919.39}, {"t": "1101", "p": 3918.44}, {"t": "1102", "p": 3916.61}, {"t": "1103", "p": 3917.46}, {"t": "1104", "p": 3919.17}, {"t": "1105", "p": 3920.4}, {"t": "1106", "p": 3922.0}, {"t": "1107", "p": 3921.31}, {"t": "1108", "p": 3921.4}, {"t": "1109", "p": 3920.62}, {"t": "1110", "p": 3921.49}, {"t": "1111", "p": 3920.67}, {"t": "1112", "p": 3921.69}, {"t": "1113", "p": 3922.23}, {"t": "1114", "p": 3922.81}, {"t": "1115", "p": 3921.96}, {"t": "1116", "p": 3920.68}, {"t": "1117", "p": 3919.97}, {"t": "1118", "p": 3920.51}, {"t": "1119", "p": 3920.16}, {"t": "1120", "p": 3919.48}, {"t": "1121", "p": 3918.81}, {"t": "1122", "p": 3919.1}, {"t": "1123", "p": 3920.51}, {"t": "1124", "p": 3921.36}, {"t": "1125", "p": 3921.19}, {"t": "1126", "p": 3919.44}, {"t": "1127", "p": 3920.61}, {"t": "1128", "p": 3920.6}, {"t": "1129", "p": 3920.48}, {"t": "1130", "p": 3920.7}, {"t": "1300", "p": 3920.7}, {"t": "1301", "p": 3922.8}, {"t": "1302", "p": 3925.46}, {"t": "1303", "p": 3926.02}, {"t": "1304", "p": 3928.42}, {"t": "1305", "p": 3926.51}, {"t": "1306", "p": 3925.19}, {"t": "1307", "p": 3924.14}, {"t": "1308", "p": 3923.74}, {"t": "1309", "p": 3924.91}, {"t": "1310", "p": 3924.67}, {"t": "1311", "p": 3925.25}, {"t": "1312", "p": 3920.86}, {"t": "1313", "p": 3921.17}, {"t": "1314", "p": 3920.4}, {"t": "1315", "p": 3921.87}, {"t": "1316", "p": 3922.88}, {"t": "1317", "p": 3923.2}, {"t": "1318", "p": 3924.16}, {"t": "1319", "p": 3923.58}, {"t": "1320", "p": 3924.93}, {"t": "1321", "p": 3925.01}, {"t": "1322", "p": 3924.93}, {"t": "1323", "p": 3923.88}, {"t": "1324", "p": 3924.22}, {"t": "1325", "p": 3924.12}, {"t": "1326", "p": 3926.13}, {"t": "1327", "p": 3927.12}, {"t": "1328", "p": 3926.99}, {"t": "1329", "p": 3929.03}, {"t": "1330", "p": 3930.26}, {"t": "1331", "p": 3934.0}, {"t": "1332", "p": 3935.34}, {"t": "1333", "p": 3935.85}, {"t": "1334", "p": 3934.78}, {"t": "1335", "p": 3934.27}, {"t": "1336", "p": 3937.49}, {"t": "1337", "p": 3935.73}, {"t": "1338", "p": 3935.5}, {"t": "1339", "p": 3936.94}, {"t": "1340", "p": 3935.9}, {"t": "1341", "p": 3934.99}, {"t": "1342", "p": 3936.0}, {"t": "1343", "p": 3936.06}, {"t": "1344", "p": 3936.54}, {"t": "1345", "p": 3936.5}, {"t": "1346", "p": 3937.07}, {"t": "1347", "p": 3936.64}, {"t": "1348", "p": 3936.54}, {"t": "1349", "p": 3936.13}, {"t": "1350", "p": 3936.62}, {"t": "1351", "p": 3936.48}, {"t": "1352", "p": 3934.15}, {"t": "1353", "p": 3932.22}, {"t": "1354", "p": 3932.84}, {"t": "1355", "p": 3933.07}, {"t": "1356", "p": 3931.7}, {"t": "1357", "p": 3930.64}, {"t": "1358", "p": 3929.99}, {"t": "1359", "p": 3931.31}, {"t": "1400", "p": 3931.86}, {"t": "1401", "p": 3931.2}, {"t": "1402", "p": 3930.73}, {"t": "1403", "p": 3931.29}, {"t": "1404", "p": 3930.8}, {"t": "1405", "p": 3928.65}, {"t": "1406", "p": 3927.99}, {"t": "1407", "p": 3927.35}, {"t": "1408", "p": 3928.06}, {"t": "1409", "p": 3927.38}, {"t": "1410", "p": 3927.05}, {"t": "1411", "p": 3928.35}, {"t": "1412", "p": 3930.13}, {"t": "1413", "p": 3931.18}, {"t": "1414", "p": 3929.88}, {"t": "1415", "p": 3930.07}, {"t": "1416", "p": 3930.52}, {"t": "1417", "p": 3931.46}, {"t": "1418", "p": 3930.9}, {"t": "1419", "p": 3931.66}, {"t": "1420", "p": 3932.58}, {"t": "1421", "p": 3930.96}, {"t": "1422", "p": 3931.02}, {"t": "1423", "p": 3931.35}, {"t": "1424", "p": 3931.68}, {"t": "1425", "p": 3932.9}, {"t": "1426", "p": 3933.44}, {"t": "1427", "p": 3933.05}, {"t": "1428", "p": 3933.54}, {"t": "1429", "p": 3933.4}, {"t": "1430", "p": 3932.61}, {"t": "1431", "p": 3931.45}, {"t": "1432", "p": 3931.52}, {"t": "1433", "p": 3932.84}, {"t": "1434", "p": 3933.27}, {"t": "1435", "p": 3934.45}, {"t": "1436", "p": 3934.59}, {"t": "1437", "p": 3934.56}, {"t": "1438", "p": 3935.27}, {"t": "1439", "p": 3934.89}, {"t": "1440", "p": 3935.51}, {"t": "1441", "p": 3935.88}, {"t": "1442", "p": 3935.63}, {"t": "1443", "p": 3934.14}, {"t": "1444", "p": 3933.88}, {"t": "1445", "p": 3933.81}, {"t": "1446", "p": 3934.27}, {"t": "1447", "p": 3934.15}, {"t": "1448", "p": 3933.07}, {"t": "1449", "p": 3933.27}, {"t": "1450", "p": 3933.48}, {"t": "1451", "p": 3933.81}, {"t": "1452", "p": 3934.04}, {"t": "1453", "p": 3933.33}, {"t": "1454", "p": 3934.08}, {"t": "1455", "p": 3932.92}, {"t": "1456", "p": 3933.22}, {"t": "1457", "p": 3933.54}, {"t": "1458", "p": 3932.99}, {"t": "1459", "p": 3932.99}, {"t": "1500", "p": 3932.7}], "note": "v2.8多因子(动量+尾盘动向+日内位置+量能+宽度+小盘情绪), 预测1小时后方向, 置信度0.00 ｜ 置信度0.00 < 0.35, 信号不足, 仅观望不判方向", "raw_prob": 51.0, "min_conf": 0.35, "actionable": false, "display_verdict": "震荡"}, "preopen": {"time": "16:13:41", "rows": [{"code": "605577", "name": "龙版传媒", "price": 17.11, "pct": 10.03, "limit_up": 17.11, "dist_limit_up": 0.0, "prob": 100.0, "model": "启发式", "volratio": 67630.0, "float_mv": 76.04, "yao": true, "yao_days": 5}, {"code": "600865", "name": "百大集团", "price": 12.49, "pct": 10.04, "limit_up": 12.49, "dist_limit_up": 0.0, "prob": 100.0, "model": "启发式", "volratio": 300767.0, "float_mv": 46.99, "yao": true, "yao_days": 2}, {"code": "605580", "name": "恒盛能源", "price": 24.41, "pct": 8.63, "limit_up": 24.72, "dist_limit_up": 1.27, "prob": 100.0, "model": "启发式", "volratio": -93.0, "float_mv": 68.35, "yao": true, "yao_days": 2}, {"code": "605398", "name": "新炬网络", "price": 27.99, "pct": 4.99, "limit_up": 29.33, "dist_limit_up": 4.79, "prob": 100.0, "model": "启发式", "volratio": -14.0, "float_mv": 45.54, "yao": true, "yao_days": 2}, {"code": "603163", "name": "圣晖集成", "price": 77.83, "pct": 2.14, "limit_up": 83.82, "dist_limit_up": 7.7, "prob": 98.2, "model": "启发式", "volratio": 9.0, "float_mv": 77.83, "yao": false, "yao_days": 0}], "note": "9:25:02首扫全市场主板(排除持仓/ST, 市值≥37亿, 价≥8), 之后每分钟从候选池重排; 涨停概率为统计打分, 非保证"}, "close": {"time": "16:13:42", "market": {"prob": 59.9, "verdict": "观望", "sh_pct": 0.07, "cyb_pct": 3.41, "sector_avg": -0.21, "breadth": 0.083, "breadth_up": 1, "breadth_down": 11, "retail": 1.67, "late": -0.02, "confidence": 0.0, "raw_prob": 59.9}, "stocks": [{"name": "中天科技", "code": "600522", "prob": 87.7, "verdict": "观望", "factors": [["大盘", 3.52, "上证+0.07% 创业板+3.41%"], ["板块(信息技术)", 4.01, "+3.34%"], ["当日阴阳", 1.5, "收阳"], ["影线", 1.06, "下影85% 上影15%"], ["量能", 0, "换手3.7%"], ["持仓位置", 0, "-4.86%"], ["宽度", -1.25, "上涨板块占比0.08"], ["小盘", 1.0, "国证2000+1.67%"], ["尾盘动向", -0.02, "上证尾盘-0.02%"]], "feats": {"sh_pct": 0.07, "cyb_pct": 3.41, "sec_pct": 3.34, "pct_pos": 1, "lower": 0.8522727272727249, "upper": 0.1477272727272752, "turnover": 3.7, "pnl_pct": -4.86, "breadth": 0.083, "retail_pct": 1.67, "late": -0.02}, "raw_prob": 87.7}, {"name": "黄河旋风", "code": "600172", "prob": 77.0, "verdict": "观望", "factors": [["大盘", 3.52, "上证+0.07% 创业板+3.41%"], ["板块()", 0.0, "+0.00%"], ["当日阴阳", 1.5, "收阳"], ["影线", 0.81, "下影77% 上影23%"], ["量能", 0.5, "换手18.9%"], ["持仓位置", 0, "+3.97%"], ["宽度", -1.25, "上涨板块占比0.08"], ["小盘", 1.0, "国证2000+1.67%"], ["尾盘动向", -0.02, "上证尾盘-0.02%"]], "feats": {"sh_pct": 0.07, "cyb_pct": 3.41, "sec_pct": 0, "pct_pos": 1, "lower": 0.7686567164179113, "upper": 0.2313432835820886, "turnover": 18.93, "pnl_pct": 3.97, "breadth": 0.083, "retail_pct": 1.67, "late": -0.02}, "raw_prob": 77.0}, {"name": "金富科技", "code": "003018", "prob": 60.9, "verdict": "观望", "factors": [["大盘", 3.52, "上证+0.07% 创业板+3.41%"], ["板块()", 0.0, "+0.00%"], ["当日阴阳", -1.5, "收阴"], ["影线", 0.47, "下影66% 上影34%"], ["量能", 0, "换手8.1%"], ["持仓位置", 0, "+2.77%"], ["宽度", -1.25, "上涨板块占比0.08"], ["小盘", 1.0, "国证2000+1.67%"], ["尾盘动向", -0.02, "上证尾盘-0.02%"]], "feats": {"sh_pct": 0.07, "cyb_pct": 3.41, "sec_pct": 0, "pct_pos": -1, "lower": 0.6567656765676564, "upper": 0.3432343234323436, "turnover": 8.09, "pnl_pct": 2.77, "breadth": 0.083, "retail_pct": 1.67, "late": -0.02}, "raw_prob": 60.9}, {"name": "共达电声", "code": "002655", "prob": 76.2, "verdict": "观望", "factors": [["大盘", 3.52, "上证+0.07% 创业板+3.41%"], ["板块()", 0.0, "+0.00%"], ["当日阴阳", 1.5, "收阳"], ["影线", 1.08, "下影86% 上影14%"], ["量能", 0, "换手8.4%"], ["持仓位置", 0, "+0.31%"], ["宽度", -1.25, "上涨板块占比0.08"], ["小盘", 1.0, "国证2000+1.67%"], ["尾盘动向", -0.02, "上证尾盘-0.02%"]], "feats": {"sh_pct": 0.07, "cyb_pct": 3.41, "sec_pct": 0, "pct_pos": 1, "lower": 0.8587786259541993, "upper": 0.14122137404580068, "turnover": 8.38, "pnl_pct": 0.31, "breadth": 0.083, "retail_pct": 1.67, "late": -0.02}, "raw_prob": 76.2}], "note": "v2.8多因子(大盘/板块/宽度/小盘/尾盘动向+个股阴阳/影线/量能/持仓位置), 置信度0.00, 非投资建议 ｜ 大盘置信度0.00<0.35, 信号不足, 仅观望不判方向"}, "alerts": [], "closed_positions": [{"name": "中京电子", "code": "002579", "market": "sz", "buy_date": "2026-08-17", "close_date": "2026-08-19", "shares": 800, "cost": 15.426, "close_price": 14.8, "realized_pnl": -511.92, "holding_days": 2, "note": "2026-08-19 09:43 卖出 800股@14.800(实际持仓 0，资金 T+1 到账)"}, {"name": "浙江医药", "code": "600216", "market": "sh", "buy_date": "2026-08-19", "close_date": "2026-08-21", "shares": 600, "cost": 0.0, "close_price": null, "realized_pnl": null, "holding_days": 2, "note": "清仓(卖出价待补全，成本此前为新购待入账)"}, {"name": "中国巨石", "code": "600176", "market": "sh", "buy_date": "2026-08-16", "close_date": "2026-08-21", "shares": 400, "cost": 45.704, "close_price": null, "realized_pnl": null, "holding_days": 5, "note": "清仓(卖出价待补全)"}], "closed_total_pnl": -511.92, "closed_today_pnl": 0, "sector_drivers": {"time": "16:13:42", "index_name": "上证指数", "index_pct": 0.07, "move": "区间震荡", "pullers": [{"name": "CPO光模块", "code": "TH:CPO光模块", "pct": 8.6, "dev": 8.53}, {"name": "PCB", "code": "TH:PCB", "pct": 7.81, "dev": 7.74}, {"name": "光纤光缆", "code": "TH:光纤光缆", "pct": 4.05, "dev": 3.98}], "pressers": [{"name": "煤炭", "code": "TH:煤炭", "pct": -2.71, "dev": -2.78}, {"name": "化工", "code": "TH:化工", "pct": -2.46, "dev": -2.53}, {"name": "数字货币", "code": "TH:数字货币", "pct": -1.94, "dev": -2.01}], "threshold": 0.8, "note": "以上证指数涨跌幅为基准, 细分题材(成分股平均涨跌)相对大盘偏离≥0.8%视为明显异动; 拉=正向拉动指数, 踩=负向压制指数"}, "gapup": {"time": "16:13:43", "rows": [{"code": "605133", "name": "嵘泰股份", "price": 25.23, "pct": 1.9, "dist_limit_up": 7.97, "weibi": 0.91, "volratio": 6.0, "late_pull": 0.0, "prob": 54.8, "model": "启发式", "heuristic_prob": 54.8, "ai_prob": null, "confidence": 0.07}, {"code": "002597", "name": "金禾实业", "price": 21.2, "pct": 0.62, "dist_limit_up": 9.34, "weibi": 0.81, "volratio": 4.0, "late_pull": 0.0, "prob": 53.8, "model": "启发式", "heuristic_prob": 53.8, "ai_prob": null, "confidence": 0.05}, {"code": "600664", "name": "哈药股份", "price": 8.0, "pct": 2.83, "dist_limit_up": 7.0, "weibi": 1.07, "volratio": 1, "late_pull": 0.0, "prob": 53.8, "model": "启发式", "heuristic_prob": 53.8, "ai_prob": null, "confidence": 0.05}, {"code": "603929", "name": "亚翔集成", "price": 156.0, "pct": 3.82, "dist_limit_up": 5.96, "weibi": 1.16, "volratio": 6.0, "late_pull": 0.0, "prob": 53.7, "model": "启发式", "heuristic_prob": 53.7, "ai_prob": null, "confidence": 0.05}, {"code": "002396", "name": "星网锐捷", "price": 38.14, "pct": 3.05, "dist_limit_up": 6.74, "weibi": 0.8, "volratio": 1, "late_pull": 0.0, "prob": 53.2, "model": "启发式", "heuristic_prob": 53.2, "ai_prob": null, "confidence": 0.04}], "ai_used": false, "backend": "启发式", "context": {"breadth": 0.083, "sector_avg": -0.21, "retail": 1.67, "late": -0.02}, "note": "v2.8多因子(收盘位置/涨幅偏好/委比/量能/换手/尾盘拉升/宽度/小盘/大盘尾盘), 启发式精修(AI权重0.45), 非投资建议"}};
 render(EMBEDDED);
 document.getElementById('status').textContent = '● 快照(' + EMBEDDED.beijing + ')';function tryLive(){fetch('/api/snapshot').then(r=>r.json()).then(d=>{render(d);document.getElementById('status').textContent=d.trading?'● 实时交易中':'○ 非交易时段';}).catch(()=>{});}
 try{ setInterval(tryLive,5000); }catch(e){}

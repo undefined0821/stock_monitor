@@ -33,7 +33,7 @@ from calib import *     # 校准与调参(拆分自 app.py)
 from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 受保护策略加载器
 import store   # SQLite 存储层(运行时数据统一落库, 只依赖标准库)
 app = Flask(__name__)
-VERSION = "v3.11.16"   # 运行时数据迁SQLite存储(日志/统计/校准/日线库), 版本号由用户指定
+VERSION = "v3.11.17"   # 修回测统计by_verdict口径混入hit=None; 静态快照构建接入展示校准层
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
 

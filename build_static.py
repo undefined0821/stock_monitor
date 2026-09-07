@@ -13,17 +13,21 @@ while time.time() - t0 < 100:
             break
     time.sleep(3)
 if app._CAND_POOL:
-    snap["preopen"] = app.scan_limit_up()
+    snap["preopen"] = app._calib_preopen_view(app.scan_limit_up())
 else:
     snap["preopen"] = {"time": "构建中", "rows": [], "note": "候选池构建中"}
 # 指数预测
 try:
-    snap["idx_forecast"] = app.index_forecast()
+    # v3.11.17: 与线上 /api/snapshot 同口径 —— 展示层必须经 _calib_*_view:
+    # Platt 校准概率 + 按校准后概率重判方向 + 置信度重算 + 弱信号门控(观望)。
+    # 此前直接用原始 index_forecast(), 静态快照与线上展示两套数字,
+    # 且曾出现「校准后概率 22.4% 却仍判 看涨」的概率与方向自相矛盾数据。
+    snap["idx_forecast"] = app._calib_idx_view(app.index_forecast())
 except Exception:
     pass
 # 尾盘预测
 try:
-    snap["close"] = app.close_prediction(snap)
+    snap["close"] = app._calib_close_view(app.close_prediction(snap))
 except Exception:
     pass
 # 主题材拉/踩指数

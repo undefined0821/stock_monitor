@@ -728,7 +728,12 @@ def _recompute_pred_stats():
             if rets:
                 ent["avg_ret"] = round(sum(rets) / len(rets), 3)
             bv = {}
+            # v3.11.17: by_verdict 与 n/hit_rate 同口径 —— 只统计 hit is not None 的
+            # 方向性样本。此前把 hit=None 的记录(过期回填/观望门控)也计入分方向明细,
+            # 导致 sum(by_verdict.n) > n(如 idx_1h n=15 但分方向加总 16), 方向数据对不上。
             for r in rows:
+                if r["actual"].get("hit") is None:
+                    continue
                 v = r["pred"].get("verdict") or "-"
                 b = bv.setdefault(v, {"n": 0, "hit": 0})
                 b["n"] += 1
