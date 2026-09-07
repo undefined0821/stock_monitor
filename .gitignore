@@ -38,3 +38,6 @@ daily_bars.jsonl
 # 首发默认模板(保留在 git, 用于服务首次启动且文件缺失时自愈)
 !portfolio.json.example
 stock_classify.json
+
+# v3.12: SQLite 运行时数据库(属运行时数据, 不进 git、不随代码部署; 含 WAL/SHM 伴生文件)
+store.sqlite3*

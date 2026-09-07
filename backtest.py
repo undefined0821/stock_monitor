@@ -8,6 +8,7 @@ import requests
 # 本模块多处要用 fetch_tencent/parse_row 做实时兜底, 而 `from core import *` 并不含它们,
 # 不显式导入会在运行到实时兜底分支时 NameError。
 from market_data import fetch_tencent, parse_row
+import store   # SQLite 存储层(只依赖标准库, 运行时数据读写统一走它)
 
 __all__ = ['IDX_PRED_LOG_SEC', 'LIMITUP_HIT_PCT', 'PRED_MODULES', '_accumulate_stats', '_actual_any', '_actual_hit', '_add_trading_minutes', '_day_pct', '_day_pct_local', '_find_verify_target', '_gapup_auc', '_kline_bars_range', '_live_day_pct', '_live_next_day_return', '_load_daily', '_load_gapup_log', '_load_pred_log', '_load_stats', '_next_day_return', '_next_day_return_local', '_next_trading_day', '_recompute_pred_stats', '_save_pred_log', '_save_stats', '_verdict_hit', '_verify_one_pred', 'detect_alerts', 'load_pred_stats', 'log_prediction', 'optimize_gapup_weights', 'verify_predictions']
 
@@ -50,39 +51,17 @@ def _load_daily():
     说明: 该数据源同时被回测层(本模块的 *_local 系列)与 app.py 的日线接口使用。
     原先定义在 app.py, 但 app.py 顶层 `from backtest import *` 发生在本模块加载之后,
     本模块拿不到 app 的名字, 运行到此处会 NameError。故下沉到本模块并加入 __all__,
-    由 app.py 星号导入复用, 两边共用一份实现。"""
-    out = []
-    if not os.path.exists(DAILY_BARS):
-        return out
+    由 app.py 星号导入复用, 两边共用一份实现。
+    v3.12: 底层存储已迁 SQLite(store.get_dates), 读取语义不变(按日期升序)。"""
     try:
-        with open(DAILY_BARS, "r", encoding="utf-8") as f:
-            for ln in f:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(json.loads(ln))
-                except Exception:
-                    continue
+        return store.get_dates()
     except Exception:
-        pass
-    out.sort(key=lambda r: r.get("date", ""))
-    return out
+        return []
 
 
 def _load_gapup_log():
-    recs = []
-    if os.path.exists(GAPUP_LOG):
-        with open(GAPUP_LOG, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    recs.append(json.loads(line))
-                except Exception:
-                    continue
-    return recs
+    # v3.12: 已迁 SQLite(logs:gapup_log), 首次访问自动从遗留 gapup_log.jsonl 导入
+    return store.get_log('gapup_log')
 
 
 
@@ -126,20 +105,17 @@ def _find_verify_target(target_date=None):
 
 
 def _load_stats():
-    if os.path.exists(GAPUP_STATS):
-        try:
-            with open(GAPUP_STATS, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
+    # v3.12: 已迁 SQLite(kv:gapup_stats)
+    d = store.get_json('gapup_stats')
+    if isinstance(d, dict):
+        return d
     return {"total": 0, "gap_up": 0, "hit_rate": 0.0, "rank_hits": {},
             "avg_pred": 0.0, "avg_actual": 0.0, "recent": [], "optimizations": []}
 
 
 
 def _save_stats(stats):
-    with open(GAPUP_STATS, "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
+    store.set_json('gapup_stats', stats, mirror=GAPUP_STATS)
 
 
 
@@ -326,8 +302,7 @@ def optimize_gapup_weights():
                   "objective_before": round(_obj(base), 4),
                   "objective_after": round(_obj(best), 4),
                   "at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")}
-        with open(GAPUP_TUNED, "w", encoding="utf-8") as f:
-            json.dump({k: best[k] for k in tune_keys}, f, ensure_ascii=False, indent=2)
+        store.set_json('gapup_tuned', {k: best[k] for k in tune_keys}, mirror=GAPUP_TUNED)
         stats = _load_stats()
         stats.setdefault("optimizations", []).append(result)
         stats["optimizations"] = stats["optimizations"][-10:]
@@ -373,31 +348,13 @@ LIMITUP_HIT_PCT = 9.8           # 主板涨停判定(留0.2pp容差, 覆盖价�
 
 
 def _load_pred_log():
-    out = []
-    if not os.path.exists(PRED_LOG):
-        return out
-    try:
-        with open(PRED_LOG, "r", encoding="utf-8") as f:
-            for ln in f:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(json.loads(ln))
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    return out
+    # v3.12: 已迁 SQLite(logs:pred_log), 首次访问自动从遗留 pred_log.jsonl 导入
+    return store.get_log('pred_log')
 
 
 
 def _save_pred_log(recs):
-    tmp = PRED_LOG + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for r in recs:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    os.replace(tmp, PRED_LOG)
+    store.save_log('pred_log', recs, mirror=PRED_LOG)
 
 
 
@@ -786,10 +743,7 @@ def _recompute_pred_stats():
                               "hit": r["actual"].get("hit")} for r in rows_sorted[:12]]
         stats["modules"][m] = ent
     try:
-        tmp = PRED_STATS + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(stats, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, PRED_STATS)
+        store.set_json('pred_stats', stats, mirror=PRED_STATS)
     except Exception:
         pass
     return stats
@@ -797,11 +751,10 @@ def _recompute_pred_stats():
 
 
 def load_pred_stats():
-    if os.path.exists(PRED_STATS):
-        try:
-            return json.load(open(PRED_STATS, encoding="utf-8"))
-        except Exception:
-            pass
+    # v3.12: 已迁 SQLite(kv:pred_stats), 无快照时现算
+    d = store.get_json('pred_stats')
+    if isinstance(d, dict) and d.get("updated_at"):
+        return d
     return _recompute_pred_stats()
 
 

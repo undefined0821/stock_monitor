@@ -31,6 +31,7 @@ from market_data import *  # 行情数据层
 from backtest import *     # 预测回测闭环
 from calib import *     # 校准与调参(拆分自 app.py)
 from strategy_loader import load as _load_pool_strategy   # v3.12 功能: 受保护策略加载器
+import store   # SQLite 存储层(运行时数据统一落库, 只依赖标准库)
 app = Flask(__name__)
 VERSION = "v3.11.15"   # v3.11.14 修统计重算崩溃(尾盘模块恒显0样本)后递增, 用户授权"解决后更新版本号"
 
@@ -43,18 +44,16 @@ _CLASSIFY_CACHE = None
 def load_classify_cache():
     global _CLASSIFY_CACHE
     if _CLASSIFY_CACHE is None:
-        try:
-            with open(CLASSIFY_CACHE_FILE, "r", encoding="utf-8") as f:
-                _CLASSIFY_CACHE = json.load(f)
-        except Exception:
+        # v3.12: 已迁 SQLite(kv:classify_cache), 首次访问自动从遗留 stock_classify.json 导入
+        _CLASSIFY_CACHE = store.get_json('classify_cache', {})
+        if not isinstance(_CLASSIFY_CACHE, dict):
             _CLASSIFY_CACHE = {}
     return _CLASSIFY_CACHE
 
 
 def save_classify_cache(cache):
     try:
-        with open(CLASSIFY_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+        store.set_json('classify_cache', cache, mirror=CLASSIFY_CACHE_FILE)
     except Exception:
         pass
 
@@ -597,20 +596,24 @@ def _seed_gapup_baseline():
         })
     rec = {"date": now.strftime("%Y-%m-%d"), "scan_time": now.strftime("%H:%M:%S"),
            "source": "manual_baseline", "stocks": stocks, "verified": False}
-    with open(GAPUP_LOG, "w", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    store.save_log('gapup_log', [rec], mirror=GAPUP_LOG)
     print(f"[init] gapup_log.jsonl 缺失, 已用实时推荐播种基线({len(stocks)}只, 真实特征)", flush=True)
 
 
 def _ensure_runtime_data():
     """启动自愈: 确保运行时数据文件存在, 缺失则用模板/基线初始化, 避免空文件致服务异常。
     注意: 这些文件属用户数据, 正常发布由 deploy.sh 保证与线上一致, 此处仅兜底。"""
+    # v3.12: 启动时把仍存在的遗留 JSON/JSONL 一次性导入 SQLite(幂等, 已导入的自动跳过)
+    try:
+        store.migrate_all()
+    except Exception:
+        traceback.print_exc()
     if not os.path.exists(PORTFOLIO_PATH):
         example = PORTFOLIO_PATH + ".example"
         if os.path.exists(example):
             shutil.copyfile(example, PORTFOLIO_PATH)
             print(f"[init] portfolio.json 缺失, 已用示例模板初始化", flush=True)
-    if not os.path.exists(GAPUP_LOG):
+    if not store.get_log('gapup_log'):
         _seed_gapup_baseline()
     # 2.5) 加载概率校准参数(Platt scaling), 保证重启后推荐概率延续上次校准结果
     _load_gapup_calib()
@@ -619,12 +622,11 @@ def _ensure_runtime_data():
     _apply_pred_tune()
     # 3) 加载调优后的权重(若存在)覆盖默认 gu_*(部分字典即可, gap_up_score 会合并到 FCONFIG)
     global GAPUP_WEIGHT_OVERRIDE
-    if os.path.exists(GAPUP_TUNED):
+    tw = store.get_json('gapup_tuned')
+    if isinstance(tw, dict) and tw:
         try:
-            tw = json.load(open(GAPUP_TUNED, encoding="utf-8"))
-            if isinstance(tw, dict) and tw:
-                GAPUP_WEIGHT_OVERRIDE = {k: float(v) for k, v in tw.items()}
-                print(f"[init] 已加载调优权重: {len(tw)} 项", flush=True)
+            GAPUP_WEIGHT_OVERRIDE = {k: float(v) for k, v in tw.items()}
+            print(f"[init] 已加载调优权重: {len(tw)} 项", flush=True)
         except Exception:
             pass
     # 2.6) 启动即按当前 pred_log + 已加载的校准参数重算回测统计, 避免重启后面板读到旧缓存文件
@@ -1902,9 +1904,7 @@ def _log_gapup_record(rec):
                 break
         else:
             recs.append(rec)          # 不存在则新增
-        with open(GAPUP_LOG, "w", encoding="utf-8") as f:
-            for r in recs:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        store.save_log('gapup_log', recs, mirror=GAPUP_LOG)
     except Exception:
         traceback.print_exc()
 
@@ -1952,9 +1952,7 @@ def _verify_gapup_open(target_date=None):
             if r.get("date") == rec.get("date") and r.get("source") == rec.get("source"):
                 recs[i] = rec
                 break
-        with open(GAPUP_LOG, "w", encoding="utf-8") as f:
-            for r in recs:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        store.save_log('gapup_log', recs, mirror=GAPUP_LOG)
         stats = _accumulate_stats(rec)
         ng = sum(1 for a in actual if a.get("is_gap_up"))
         print(f"[gapup-verify] {rec.get('date')} 验证完成: 高开 {ng}/{len(actual)}", flush=True)
@@ -2174,11 +2172,7 @@ def capture_daily_bars():
             guard += 1
         if guard:
             note.append(f"超体积上限({DAILY_MAX_MB}MB), 再丢弃最旧{guard}天")
-        tmp = DAILY_BARS + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for r in recs:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        os.replace(tmp, DAILY_BARS)
+        store.save_dates(recs)   # v3.12: 日线库已迁 SQLite(单事务原子替换)
         print(f"[daily-bars] {today} 落库 {got}只(跳过过期{stale}只), 累计 {len(recs)}天, "
               f"{_daily_size_mb(recs):.2f}MB" + (f" | 清理: {'; '.join(note)}" if note else ""),
               flush=True)
@@ -2213,11 +2207,7 @@ def _daily_merge_kline(day_vals):
     while _daily_size_mb(new_recs) > DAILY_MAX_MB and len(new_recs) > 30 and guard < 1000:
         new_recs = new_recs[1:]
         guard += 1
-    tmp = DAILY_BARS + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        for r in new_recs:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    os.replace(tmp, DAILY_BARS)
+    store.save_dates(new_recs)   # v3.12: 日线库已迁 SQLite(单事务原子替换)
     return new_recs
 
 
@@ -2356,8 +2346,8 @@ def _scan_one(bars, code, name, price, pct):
     return ok, info
 
 
-_POOL_DMAP = None          # v3.12: 选股池本地日线库内存缓存(code->bars), 文件未变则复用
-_POOL_DMAP_FILESZ = -1     # 缓存对应时的 daily_bars.jsonl 文件大小
+_POOL_DMAP = None          # v3.12: 选股池本地日线库内存缓存(code->bars), 数据未变则复用
+_POOL_DMAP_DVER = -1       # 缓存对应时的日线库数据版本号(store.dates_version, 落库自增)
 
 def _build_stock_pool(force=False):
     """后台全市场扫描主板, 产出选股池 TopN, 写入 STATE['stock_pool']。
@@ -2365,7 +2355,7 @@ def _build_stock_pool(force=False):
     两阶段: 先批量拉实时行情做轻量预筛(剔除停牌/无有效价), 再并发抓日K算指标,
     避免对全市场(数千只)盲目逐只抓K线。全程在后台线程执行, 不阻塞调度循环。
     """
-    global _POOL_DMAP, _POOL_DMAP_FILESZ
+    global _POOL_DMAP, _POOL_DMAP_DVER
     with LOCK:
         if STATE.get("stock_pool_scanning"):
             return
@@ -2418,11 +2408,9 @@ def _build_stock_pool(force=False):
         min_bars = int(p["lookback"]) + int(p["n_long"]) + 1
         bars_n = max(int(p["bars"]), min_bars + 2)
         _dmap = None
-        try:
-            _fsz = os.path.getsize(DAILY_BARS)
-        except Exception:
-            _fsz = -1
-        if force or _fsz != _POOL_DMAP_FILESZ or _POOL_DMAP is None:
+        # v3.12: 缓存键由"日线文件大小"改为"日线库数据版本号"(存储已迁 SQLite)
+        _fsz = store.dates_version()
+        if force or _fsz != _POOL_DMAP_DVER or _POOL_DMAP is None:
             _dmap = {}
             try:
                 for _r in _load_daily():
@@ -2432,7 +2420,7 @@ def _build_stock_pool(force=False):
                             {"date": _r["date"], "open": _bv.get("o"), "close": _bv.get("c"),
                              "high": _bv.get("h"), "low": _bv.get("l")})
                 _POOL_DMAP = _dmap
-                _POOL_DMAP_FILESZ = _fsz
+                _POOL_DMAP_DVER = _fsz
             except Exception:
                 _dmap = {}
         else:
@@ -2459,10 +2447,7 @@ def _build_stock_pool(force=False):
                             {"date": _r["date"], "open": _bv.get("o"), "close": _bv.get("c"),
                              "high": _bv.get("h"), "low": _bv.get("l")})
                 _POOL_DMAP = _dmap
-                try:
-                    _POOL_DMAP_FILESZ = os.path.getsize(DAILY_BARS)
-                except Exception:
-                    _POOL_DMAP_FILESZ = -1
+                _POOL_DMAP_DVER = store.dates_version()
             except Exception:
                 traceback.print_exc()
 
@@ -2714,11 +2699,7 @@ def api_tune_reset():
     """v3.11.0: 清除自动调参结果, 恢复默认权重/阈值。"""
     global _PRED_TUNE
     _PRED_TUNE = {}
-    try:
-        if os.path.exists(PRED_TUNE):
-            os.remove(PRED_TUNE)
-    except Exception:
-        pass
+    store.del_json('pred_tune', mirror=PRED_TUNE)   # v3.12: 已迁 SQLite
     for k in list(FCONFIG.keys()):
         if k in _TUNE_W_DEFAULT:
             FCONFIG[k] = _TUNE_W_DEFAULT[k]
@@ -2730,11 +2711,7 @@ def api_tune_reset():
     # v3.11.1: gapup 权重覆盖(由 optimize_gapup_weights 落盘 GAPUP_TUNED)一并恢复默认
     global GAPUP_WEIGHT_OVERRIDE
     GAPUP_WEIGHT_OVERRIDE = None
-    try:
-        if os.path.exists(GAPUP_TUNED):
-            os.remove(GAPUP_TUNED)
-    except Exception:
-        pass
+    store.del_json('gapup_tuned', mirror=GAPUP_TUNED)   # v3.12: 已迁 SQLite
     try:
         _recompute_pred_stats()
     except Exception:
@@ -2790,12 +2767,9 @@ def api_gapup_log():
     recs = _load_gapup_log()
     recs.sort(key=lambda r: r.get("date", ""), reverse=True)
     stats = _load_stats()
-    tuned = None
-    if os.path.exists(GAPUP_TUNED):
-        try:
-            tuned = json.load(open(GAPUP_TUNED, encoding="utf-8"))
-        except Exception:
-            pass
+    tuned = store.get_json('gapup_tuned')
+    if not isinstance(tuned, dict):
+        tuned = None
     return jsonify({
         "records": recs[:30],
         "stats": stats,

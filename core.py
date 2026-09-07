@@ -3,6 +3,7 @@
 由 app.py 拆分而来, 各子模块用 `from core import *` 引入, 避免循环依赖。"""
 
 import json, re, math, time, threading, datetime, os, random, traceback, shutil, copy
+import store   # SQLite 存储层(只依赖标准库, 供最底层安全引用, 无循环导入风险)
 __all__ = ['AI_BASE', 'AI_CFG', 'AI_ENABLED', 'AI_KEY', 'AI_MODEL', 'ANOM', 'BASE', 'CLASSIFY_CACHE_FILE', 'CLOSED', 'DAILY_BARS', 'DAILY_KEEP_DAYS', 'DAILY_MAX_MB', 'DAILY_UNIVERSE_LIMIT', 'DAILY_WARMUP_DAYS', 'DAILY_WARMUP_WORKERS', 'F', 'FCONFIG', 'FORECAST_CFG', 'GAPUP_CALIB', 'GAPUP_LOG', 'GAPUP_MIN_CALIB_SAMPLES', 'GAPUP_MIN_GAP_PCT', 'GAPUP_MIN_OPT_SAMPLES', 'GAPUP_OPT_CAL', 'GAPUP_OPT_MULTIPLIERS', 'GAPUP_OPT_REG', 'GAPUP_STATS', 'GAPUP_TUNED', 'GAPUP_WEIGHT_OVERRIDE', 'HEADERS', 'HOLDINGS_RAW', 'IDX_AI_FUSE_SEC', 'IDX_FORECAST_SEC', 'INDICES', 'KLINE_RPS', 'LOCK', 'MINUTE_CACHE_TTL', 'POLL', 'PCFG', 'POOL', 'PORT', 'PORTFOLIO_PATH', 'PRED_CALIB', 'PRED_LOG', 'PRED_MIN_CALIB_SAMPLES', 'PRED_STATS', 'PREOPEN_CFG', 'PREOPEN_FAST_SEC', 'PRESSURE_PCT', 'RETAIL_INDEX', 'SCAN', 'SCFG', 'SELF_KEEPALIVE_END', 'SELF_KEEPALIVE_INTERVAL_SEC', 'SELF_KEEPALIVE_ON', 'SELF_KEEPALIVE_START', 'SELF_KEEPALIVE_URL', 'SET', 'STATE', 'TAKE_PROFIT_PCT', 'WATCHLIST', '_CALIB_A_RANGE', '_CALIB_MAX_ABS_B', '_FETCH_POOL', '_FORECAST_DEFAULTS', '_MINUTE_CACHE', '_GAPUP_CALIB', '_PRED_CALIB', '_HERE', '_HOLD_LOCK', '_POOL_DEFAULTS', '_SCAN_DEFAULTS', '_TENCENT_SESSION', '_rate_limit', '_market_prefix', '_parse_hhmm', 'beijing_now', 'is_weekday', 'num', 'trading_phase']
 
 # BASE: 跨平台——默认取脚本所在目录; 沙箱/旧部署兜底到 /workspace/stock_monitor
@@ -187,14 +188,12 @@ _FORECAST_DEFAULTS = {
 FORECAST_CFG = SET.get("forecast", {})
 FCONFIG = {**_FORECAST_DEFAULTS, **FORECAST_CFG}            # 生效的预测配置
 # v3.4: 若存在调优后的 gu_* 权重, 启动时加载覆盖默认(由回测闭环自动生成)
-if os.path.exists(GAPUP_TUNED):
-    try:
-        _tw = json.load(open(GAPUP_TUNED, encoding="utf-8"))
-        for _k, _v in _tw.items():
-            FCONFIG[_k] = _v
-        print(f"[init] 已加载调优权重: {list(_tw.keys())}", flush=True)
-    except Exception:
-        pass
+# v3.12: 已迁 SQLite(kv:gapup_tuned), 首次访问自动从遗留 JSON 导入
+_tw = store.get_json('gapup_tuned')
+if isinstance(_tw, dict) and _tw:
+    for _k, _v in _tw.items():
+        FCONFIG[_k] = _v
+    print(f"[init] 已加载调优权重: {list(_tw.keys())}", flush=True)
 # 可选 AI 精修: 配置 OpenAI 兼容接口后, 平台算法可调用更强模型提升预测准确度
 AI_CFG = SET.get("ai_assist", {})
 AI_ENABLED = str(os.environ.get("AI_ASSIST", AI_CFG.get("enabled", "0"))).lower() in ("1", "true", "on")

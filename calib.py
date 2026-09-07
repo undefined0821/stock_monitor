@@ -7,6 +7,7 @@ from core import *
 from market_data import *
 from backtest import *
 from config import *
+import store   # SQLite 存储层(只依赖标准库)
 
 __all__ = [
     '_load_gapup_calib',
@@ -50,15 +51,13 @@ __all__ = [
 ]
 
 def _load_gapup_calib():
-    """启动时加载已拟合的校准参数(A/B)。"""
+    """启动时加载已拟合的校准参数(A/B)。v3.12: 已迁 SQLite(kv:gapup_calib)。"""
     global _GAPUP_CALIB
     try:
-        if os.path.exists(GAPUP_CALIB):
-            with open(GAPUP_CALIB, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            if d.get("A") is not None and d.get("B") is not None:
-                _GAPUP_CALIB.update(d)
-                print(f"[init] 已加载概率校准: A={d['A']} B={d['B']} n={d.get('n')}", flush=True)
+        d = store.get_json('gapup_calib')
+        if isinstance(d, dict) and d.get("A") is not None and d.get("B") is not None:
+            _GAPUP_CALIB.update(d)
+            print(f"[init] 已加载概率校准: A={d['A']} B={d['B']} n={d.get('n')}", flush=True)
     except Exception:
         pass
 
@@ -141,10 +140,7 @@ def fit_gapup_calib():
     _GAPUP_CALIB.update({"A": round(A, 6), "B": round(B, 6), "n": n,
                          "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")})
     try:
-        tmp = GAPUP_CALIB + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_GAPUP_CALIB, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, GAPUP_CALIB)
+        store.set_json('gapup_calib', _GAPUP_CALIB, mirror=GAPUP_CALIB)
     except Exception as e:
         print("[calib] 写入失败:", e, flush=True)
     return {"ok": True, "A": round(A, 6), "B": round(B, 6), "n": n,
@@ -162,13 +158,11 @@ def fit_gapup_calib():
 # 不会形成反馈漂移(验证回填读的是原始 prob)。
 # ─────────────────────────────────────────────────────────────────────────────
 def _load_pred_calib():
-    """启动时加载各模块的预测概率校准参数(A/B)。"""
+    """启动时加载各模块的预测概率校准参数(A/B)。v3.12: 已迁 SQLite(kv:pred_calib)。"""
     global _PRED_CALIB
     try:
-        if os.path.exists(PRED_CALIB):
-            with open(PRED_CALIB, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            if isinstance(d, dict):
+        d = store.get_json('pred_calib')
+        if isinstance(d, dict):
                 for k, v in d.items():
                     if isinstance(v, dict) and v.get("A") is not None and v.get("B") is not None:
                         _PRED_CALIB[k] = v
@@ -251,10 +245,7 @@ def fit_pred_calib(module):
     _PRED_CALIB[module] = {"A": round(A, 6), "B": round(B, 6), "n": n,
                            "fitted_at": beijing_now().strftime("%Y-%m-%d %H:%M:%S")}
     try:
-        tmp = PRED_CALIB + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_PRED_CALIB, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, PRED_CALIB)
+        store.set_json('pred_calib', _PRED_CALIB, mirror=PRED_CALIB)
     except Exception as e:
         print("[pred-calib] 写入失败:", e, flush=True)
     return {"ok": True, "module": module, "A": round(A, 6), "B": round(B, 6), "n": n,
@@ -618,10 +609,7 @@ def auto_tune_all():
 
 def _save_pred_tune():
     try:
-        tmp = PRED_TUNE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_PRED_TUNE, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, PRED_TUNE)
+        store.set_json('pred_tune', _PRED_TUNE, mirror=PRED_TUNE)
     except Exception:
         pass
 
@@ -629,10 +617,9 @@ def _save_pred_tune():
 def _load_pred_tune():
     global _PRED_TUNE
     try:
-        if os.path.exists(PRED_TUNE):
-            d = json.load(open(PRED_TUNE, encoding="utf-8"))
-            if isinstance(d, dict):
-                _PRED_TUNE = d
+        d = store.get_json('pred_tune')
+        if isinstance(d, dict):
+            _PRED_TUNE = d
     except Exception:
         pass
 
@@ -646,13 +633,11 @@ def _apply_pred_tune_one(module):
     # v3.11.1: gapup 调权结果落在 GAPUP_TUNED, 通过实时覆盖权重 GAPUP_WEIGHT_OVERRIDE 生效(无需重启)
     if spec.get("kind") == "gapup":
         global GAPUP_WEIGHT_OVERRIDE
-        if os.path.exists(GAPUP_TUNED):
-            try:
-                GAPUP_WEIGHT_OVERRIDE = {k: float(v)
-                                         for k, v in json.load(open(GAPUP_TUNED, encoding="utf-8")).items()}
-            except Exception:
-                GAPUP_WEIGHT_OVERRIDE = None
-        else:
+        tw = store.get_json('gapup_tuned')
+        try:
+            GAPUP_WEIGHT_OVERRIDE = ({k: float(v) for k, v in tw.items()}
+                                     if isinstance(tw, dict) and tw else None)
+        except Exception:
             GAPUP_WEIGHT_OVERRIDE = None
         return
     thr = (res.get("threshold") or {}).get("threshold")
