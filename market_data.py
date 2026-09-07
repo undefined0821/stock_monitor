@@ -182,28 +182,34 @@ def _fetch_kline(code, days=12, include_today=False):
     # 上证指数 "000001" 误判为深市(平安银行), 指数均线特征需要显式前缀。
     end = beijing_now().strftime("%Y-%m-%d")
     start = (beijing_now() - datetime.timedelta(days=days * 2)).strftime("%Y-%m-%d")
-    url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-           f"?param={mkt},day,{start},{end},{days},qfq")
-    try:
-        # v3.11.14: 复用带连接池的 Session(此前每次都裸 requests.get, 新建 TCP+TLS),
-        # 并把超时由 8s 收到 4s —— 失败快速跳过, 不再拖慢整批扫描。
-        # 另加全局限速: 批量抓取时把请求在时间上摊平, 避免突发触发上游风控。
-        _rate_limit()
-        r = _tencent_session().get(url, timeout=4)
-        j = r.json()
-        node = (j.get("data") or {}).get(mkt) or {}
-        bars = node.get("qfqday") or node.get("day") or []
-        out = []
-        for b in bars:
-            try:
-                if b[0] == end and not include_today:   # 默认排除当日(盘中不完整)
+    # v3.11.18: 主域换 ifzq.gtimg.cn(与分时接口同域) —— 线上沙箱实测分时可达而
+    # web.ifzq 子域不可达, 导致沙箱内K线全部失败(均线因子恒缺失); web 子域保留为备胎。
+    urls = [f"https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={mkt},day,{start},{end},{days},qfq",
+            f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={mkt},day,{start},{end},{days},qfq"]
+    for url in urls:
+        try:
+            # v3.11.14: 复用带连接池的 Session(此前每次都裸 requests.get, 新建 TCP+TLS),
+            # 并把超时由 8s 收到 4s —— 失败快速跳过, 不再拖慢整批扫描。
+            # 另加全局限速: 批量抓取时把请求在时间上摊平, 避免突发触发上游风控。
+            _rate_limit()
+            r = _tencent_session().get(url, timeout=4)
+            j = r.json()
+            node = (j.get("data") or {}).get(mkt) or {}
+            bars = node.get("qfqday") or node.get("day") or []
+            out = []
+            for b in bars:
+                try:
+                    if b[0] == end and not include_today:   # 默认排除当日(盘中不完整)
+                        continue
+                    out.append({"date": b[0], "open": float(b[1]), "close": float(b[2]),
+                                "high": float(b[3]), "low": float(b[4]),
+                                "vol": float(b[5]) if len(b) > 5 else 0.0})
+                except (ValueError, IndexError, TypeError):
                     continue
-                out.append({"date": b[0], "open": float(b[1]), "close": float(b[2]),
-                            "high": float(b[3]), "low": float(b[4])})
-            except (ValueError, IndexError, TypeError):
-                continue
-        return out
-    except Exception:
-        return []
+            if out:
+                return out
+        except Exception:
+            continue
+    return []
 
 
